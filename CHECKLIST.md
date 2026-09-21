@@ -46,21 +46,39 @@ installed clean (exit 0); PaddleOCR warmed up (5 model bundles downloaded to
 `C:\Program Files\Tesseract-OCR\tesseract.exe` confirmed via `pytesseract.get_tesseract_version()`;
 full 10/10 smoke test passed.*
 
-### [ ] 0.6 — Project structure & skeleton
+### [x] 0.6 — Project structure & skeleton
 Create the package layout (app entry, `config/`, `ingest/`, `ocr/`, `search/`, `verify/`,
 `export/`, `db/`, `seed/`), `.env.example`, `.gitignore`, and a `README.md` stub. Initialize git.
 **Verify:** `streamlit run app.py` launches a two-tab shell (Run / Config) with no errors.
+✅ *Done 2026-09-21 — `.gitignore` written first (excludes `.env`, `__pycache__/`,
+`.pytest_cache/`, `*.db`/`*.sqlite`, model weight files, `uploads/`/`*.pdf`/`*.zip`, and
+`.claude/`); 8 package dirs created each with a docstring `__init__.py` describing its
+future role; `.env.example` mirrors the real `.env`'s key name only; `README.md` added;
+`app.py` two-tab (Run/Config) shell launched headless on port 8765 — HTTP 200, clean
+server log, no errors/warnings; server stopped after verification. `git init` +
+initial commit (15 files) — confirmed `.env` and `.claude/` excluded from the diff
+before committing.*
 
 ---
 
 ## Phase 1 — Config & persistence
 
-### [ ] 1.1 — SQLite schema + data models
+### [x] 1.1 — SQLite schema + data models
 Tables for `schema_table`, `schema_column` (name, requirement text, ordering), and
 `column_synonym`. Connection helper, migrations/`CREATE TABLE IF NOT EXISTS`, CRUD functions.
 User-scoped; survives restart.
 **Verify:** unit-level script creates a DB, writes a table + columns + synonyms, reopens the DB
 in a new process, reads them back identical — including preserved line breaks in requirement text.
+✅ *Done 2026-09-21 — `db/connection.py` (foreign_keys=ON per connection), `db/schema.py`
+(DDL with `ON DELETE CASCADE` schema_table→schema_column→column_synonym), `db/models.py`
+(frozen dataclasses), `db/crud.py` (create/get/update/delete + `reorder_tables`/
+`reorder_columns` with dense 0-based `order_index`, re-normalized on delete; no `.strip()`
+anywhere). Verified via `tests/verify_db_roundtrip.py`, which spawns two genuinely separate
+OS processes (subprocess, distinct PIDs) — 20/20 checks passed: table/column order survives
+`reorder_*`, a multi-line requirement string (trailing spaces, blank line, tab, em dash/curly
+quotes, no final newline) round-trips sha256-identical, a padded synonym round-trips
+unstripped, and `delete_column`/`delete_table` cascade correctly (verified as real DB-level
+`ON DELETE CASCADE`, since the CRUD code never manually deletes child rows).*
 
 ### [ ] 1.2 — Seed data module + first-run auto-seed
 Encode the exact Table 1 (10 columns) and Table 2 (13 rows) requirement text verbatim,
