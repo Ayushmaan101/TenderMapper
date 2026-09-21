@@ -61,4 +61,3 @@ Thumbs.db
 
 # --- Claude Code local session/tooling state (not part of the project) ---
 .claude/
-CHECKLIST.md
