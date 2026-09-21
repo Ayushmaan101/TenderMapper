@@ -25,7 +25,7 @@ from db import crud
 from db.connection import get_connection
 from db.schema import init_db
 from seed.seed_data import SEED_SCHEMA
-from seed.seeder import is_empty, seed_if_empty
+from seed.seeder import has_been_seeded, is_empty, seed_if_empty
 
 
 def sha256(s: str) -> str:
@@ -106,11 +106,30 @@ def main() -> None:
         first_col = crud.get_columns(conn, tables_after[0].id)[0]
         edited_text = "USER-EDITED: this text must survive re-seeding attempts."
         crud.update_column(conn, first_col.id, requirement_text=edited_text)
-        seed_if_empty(conn)  # must be a no-op; DB is not empty
+        seed_if_empty(conn)  # must be a no-op; already seeded
         reread = crud.get_column(conn, first_col.id)
         check(
             "user edit to a seeded column survives a subsequent seed_if_empty call",
             reread.requirement_text == edited_text,
+        )
+
+        # --- 5. user deliberately deletes every table -> a later "restart"
+        # (another seed_if_empty call, as app startup would make) must NOT
+        # silently re-seed the defaults back in. This is the scenario the
+        # live-emptiness-check design (checklist 1.2 v1) got wrong, and the
+        # has_been_seeded flag (checklist 1.3) exists specifically to fix. ---
+        for t in crud.get_tables(conn):
+            crud.delete_table(conn, t.id)
+        check("DB is empty again after user deletes every table", is_empty(conn))
+        check("has_been_seeded flag still true after user empties the DB", has_been_seeded(conn))
+        reseeded = seed_if_empty(conn)
+        check(
+            "seed_if_empty does NOT re-seed a DB the user deliberately emptied",
+            reseeded is False,
+        )
+        check(
+            "DB is still empty after the no-op seed_if_empty call (defaults not silently restored)",
+            is_empty(conn),
         )
 
         conn.close()

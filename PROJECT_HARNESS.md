@@ -203,10 +203,16 @@ straight from the DB.
   restart.
 
 ### First-ever-run auto-seeding
-On first-ever run (empty DB), the config is **auto-seeded** with the two tables in
-`SEED_SCHEMA` (see §4.1), exactly as given, so the app is usable immediately without the
-user having to manually enter the schema first. The user can then edit/add/remove from this
-seeded baseline via the Config tab at any time.
+On first-ever run, the config is **auto-seeded** with the two tables in `SEED_SCHEMA` (see
+§4.1), exactly as given, so the app is usable immediately without the user having to manually
+enter the schema first. The user can then edit/add/remove from this seeded baseline via the
+Config tab at any time.
+
+Seeding is gated by a persisted `has_been_seeded` flag in a small `app_meta` key-value table
+(`db/meta.py`), not a live "is schema_table empty" check — the latter can't distinguish "never
+seeded" from "the user deliberately deleted every table," and would silently re-seed the
+defaults back in on the next app start after such a deletion. The flag is set once, right
+after the one real seed, and nothing in this codebase ever unsets it.
 
 Seeding happens **only** when the DB is empty — never on subsequent runs, never as a reset.
 
@@ -382,3 +388,4 @@ called out as a real risk against the deployment checklist item, not a solved pr
 |---|---|---|
 | 2026-09-21 | Initial harness created from user's finalized spec. Conda env `tender-mapper` (Python 3.11.16) created and verified activatable. | Yes — original spec |
 | 2026-09-21 | All pinned dependencies installed into `tender-mapper` (checklist 0.5). PaddleOCR model weights pre-downloaded/cached (`~/.paddlex/official_models`) so first OCR run in-app won't cold-start. Tesseract 5.4.0 binary confirmed at `C:\Program Files\Tesseract-OCR\tesseract.exe` — user installed it themselves; app code must set `pytesseract.pytesseract.tesseract_cmd` to this path explicitly rather than relying on PATH. `GROQ_API_KEY` present in `.env`. Note for future code: PyMuPDF emits a deprecation warning on `import fitz`, prefers `import pymupdf` — harmless today, but new code should use `import pymupdf as fitz` or `import pymupdf` directly. Note: `paddlepaddle`'s own resolution pulled `numpy` 2.4.6, then installing the rest (`paddlex` pin) downgraded it to 2.3.5 — still satisfies paddlepaddle's `numpy>=1.21`; no action needed, just recorded so a future "why did numpy change" isn't a mystery. | Yes — checklist 0.5 |
+| 2026-09-21 | Checklist 1.3: added `app_meta` key-value table + `has_been_seeded` flag (fixing the seeding-gate gap noted in 1.2's change), built the Config tab UI, wired `seed_if_empty()` into app startup via a `st.cache_resource`-cached DB connection in `app.py`. `db/connection.py` now opens with `check_same_thread=False` (required for that cached cross-thread connection). Established `streamlit.testing.v1.AppTest` (ships with the already-pinned `streamlit` package — no new dependency) as this project's pattern for testing Streamlit UI behavior headlessly, in place of browser automation. | Yes — user-requested seeding fix + checklist 1.3 |

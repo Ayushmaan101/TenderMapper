@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS column_synonym (
 
 CREATE INDEX IF NOT EXISTS idx_schema_column_table_id ON schema_column (table_id);
 CREATE INDEX IF NOT EXISTS idx_column_synonym_column_id ON column_synonym (column_id);
+
+-- Small key-value store for app-level flags that must survive independently
+-- of schema_table's row count — e.g. has_been_seeded (see seed/seeder.py).
+-- A live "is schema_table empty" check can't distinguish "never seeded"
+-- from "user deliberately deleted every table"; this can.
+CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 

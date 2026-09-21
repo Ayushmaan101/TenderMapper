@@ -89,22 +89,46 @@ spec; second startup does **not** re-seed or duplicate; edits made by the user s
 original spec; per user's explicit choice, wrapped lines are rejoined into one continuous
 paragraph per item, single-space-joined at each line break — all other text, including
 original typos/inconsistencies like Item 3's "centre" vs. other items' "Centre" and the
-mismatched parens in Item 7, preserved as-is) and `seed/seeder.py` (`is_empty`/`seed_if_empty`,
-keyed purely on a live `schema_table` row count — no separate "has ever been seeded" flag;
-noted as a flagged design choice if stricter semantics are wanted later). Verified via
-`tests/verify_seed.py` — 58/58 checks passed: empty DB → 2 tables / 23 columns created;
-every one of the 23 `requirement_text` values individually checked character-for-character
-(`==` and sha256) against `SEED_SCHEMA`; re-running `seed_if_empty` on the now-populated DB
-returns `False` and creates zero duplicates; a user edit made after seeding survives a further
-`seed_if_empty` call. Column names ("Item N" / "Document N") are a documented default
-assumption, freely renamable via the Config tab (1.3) — not part of the user's original spec.
-Not yet wired into `app.py`; that lands in 1.3 (Config tab UI) once there's a UI to seed into.*
+mismatched parens in Item 7, preserved as-is) and `seed/seeder.py` (`is_empty`/`seed_if_empty`).
+Verified via `tests/verify_seed.py` — 58/58 checks passed: empty DB → 2 tables / 23 columns
+created; every one of the 23 `requirement_text` values individually checked
+character-for-character (`==` and sha256) against `SEED_SCHEMA`; re-running `seed_if_empty` on
+the now-populated DB returns `False` and creates zero duplicates; a user edit made after
+seeding survives a further `seed_if_empty` call. Column names ("Item N" / "Document N") are a
+documented default assumption, freely renamable via the Config tab (1.3) — not part of the
+user's original spec.
+**Superseded in 1.3:** the original v1 gating (live `schema_table` row count) couldn't tell
+"never seeded" apart from "user deliberately emptied it" — see 1.3's `app_meta.has_been_seeded`
+flag fix below.*
 
-### [ ] 1.3 — Config tab UI
+### [x] 1.3 — Config tab UI
 Dedicated Config tab: add/remove tables, add/remove/reorder columns, edit column names and
 requirement text, view/edit stored synonyms per column. Persists to SQLite on save.
 **Verify:** add a table, edit a requirement, delete a column, restart the app — all changes
 persist; seeded baseline is editable, not read-only.
+✅ *Done 2026-09-21 — **Seeding fix (requested alongside 1.3):** added `app_meta` key-value
+table (`db/schema.py`, `db/meta.py`) and switched `seed/seeder.py`'s `seed_if_empty` to gate on
+a persisted `has_been_seeded` flag instead of a live row count, so a user deliberately deleting
+every table no longer causes a later restart to silently re-seed the defaults back in
+(`tests/verify_seed.py` extended to 62/62, covering exactly that scenario). Also switched
+`db/connection.py` to `check_same_thread=False`, required for Streamlit's cached cross-thread
+connection.
+**Config tab:** `config/ui.py` (`render_config_tab`) — add/rename/delete tables; add/edit
+(name + requirement text)/reorder (▲/▼)/delete columns; view/add/remove synonyms per column.
+Every mutation calls `db/crud.py` directly, no session-state schema cache, followed by
+`st.rerun()` for a guaranteed-fresh re-render. `app.py` wires `seed_if_empty()` into a
+`st.cache_resource`-cached DB connection created at startup (once per server process).
+**Verification — `tests/verify_config_ui.py`, 18/18 checks passed, two genuinely separate OS
+processes:** phase 1 uses Streamlit's own `streamlit.testing.v1.AppTest` (no browser, no new
+dependency) to actually launch `app.py` and click the real buttons — add a table, rename a
+table, edit a column's name + multi-line requirement text, delete a column, reorder two
+columns, add two synonyms and remove one, then delete an entire table. Phase 2 reopens the
+same DB file cold, in a separate process, and confirms every action persisted exactly,
+including cascade-delete of the removed table's columns and the multi-line requirement text
+surviving the `st.text_area` round-trip untouched. Separately confirmed via `AppTest` against
+the real default DB path (not a temp override) that the production `db/tender_mapper.db` is
+created and seeded correctly on first real run, with the em dash in Item 4 verified by
+codepoint (`U+2014`) and sha256 rather than trusting terminal rendering.*
 
 ### [ ] 1.4 — Config-time synonym expansion (Groq, one-time)
 On configuring/saving a column, make **one** Groq call to generate alternate phrasings and
