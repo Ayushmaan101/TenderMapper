@@ -225,10 +225,40 @@ SQLite; clearing the upload clears session state back to empty and triggers exac
 call. Full regression suite (`verify_db_roundtrip`, `verify_seed`, `verify_config_ui`,
 `verify_synonyms`, `verify_ingest`) passes clean end-to-end.*
 
-### [ ] 2.2 — Text-layer pre-check (PyMuPDF)
+### [x] 2.2 — Text-layer pre-check (PyMuPDF)
 Per page, `get_text()`; decide "usable text layer" vs "needs OCR" with a documented threshold.
 **Verify:** on a born-digital PDF every page is marked text-layer; on a scanned PDF every page is
 marked needs-OCR; on a mixed PDF the split is correct per page.
+✅ *Done 2026-09-21 — **`ocr/text_check.py`**: `check_page_text_layer`/`check_pdf_text_layers`,
+immutable `PageTextResult` (`pdf_name, page_number, text, has_usable_text, needs_ocr,
+word_count, alnum_char_count, has_images`). **Threshold, deliberately not `len(text) > 0`:**
+`has_usable_text` requires >= 5 whitespace-separated word-tokens (each containing at least one
+alnum char, so `"----" "****"` divider noise doesn't count) AND >= 20 alnum characters total —
+catches both a scanned page's stray watermark/stamp text (too sparse to clear the bar) and a
+punctuation-only noise page (long in raw length, zero real words). `needs_ocr = (not
+has_usable_text) and has_images` — deliberately not a plain negation of `has_usable_text`: a
+short-but-real text-only page (e.g. "ANNEXURE A", no embedded image) ends up
+`has_usable_text=False, needs_ocr=False`, since there's nothing rasterized for OCR to recover
+anything better from; only when an embedded image (`page.get_images()`) is *also* present does
+the sparse/absent text trigger OCR. `has_images` is PyMuPDF's own image list, a reliable
+scanned-page signature independent of text density.
+**Verification — `tests/verify_text_check.py`, 37/37, all synthetic PDFs generated in-memory
+via PyMuPDF itself** (`page.insert_text`/`page.insert_image` with a raw `fitz.Pixmap` — no
+external files, no Pillow): an all-digital 3-page PDF (every page usable, no OCR, 1-indexed
+page numbers correct); an all-scanned 3-page PDF (every page needs OCR, empty text); a 5-page
+mixed PDF with the exact per-page digital/scanned pattern asserted page-by-page; a truly blank
+page (`has_usable_text=False, needs_ocr=False` — the "neither" case); a sparse-real-text page
+with no image (proves the "don't waste OCR on a short-but-complete page" half of the design);
+a watermark-over-a-scanned-image page (proves the "don't trust sparse text on a real scan"
+other half — `needs_ocr=True` despite text being present); a real-text page with an
+incidental logo image (usable text wins regardless of image presence); a long
+punctuation-only page demonstrating directly that raw character count alone (which a naive
+check would accept) is correctly rejected; an exact threshold-boundary pair (5 words passes,
+4 words fails) proving the documented constants are the real boundary; and a hand-crafted
+zero-page PDF (PyMuPDF's own writer can't produce one via `tobytes()`, so this fixture is a
+minimal raw PDF byte string) confirming graceful handling of the "zero-page PDFs" scenario
+CHECKLIST.md 5.1 flags for later. Full regression suite (`verify_db_roundtrip`, `verify_seed`,
+`verify_config_ui`, `verify_synonyms`, `verify_ingest`, `verify_text_check`) passes clean.*
 
 ### [ ] 2.3 — OCR pipeline (PaddleOCR primary, Tesseract fallback)
 Rasterize needs-OCR pages via PyMuPDF and OCR them. PaddleOCR primary; fall back to Tesseract on
