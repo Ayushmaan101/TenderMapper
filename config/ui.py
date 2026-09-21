@@ -11,6 +11,12 @@ next render always re-reads the fresh DB state — there is no separate
 Text is never stripped before being stored: only the *emptiness check*
 that gates whether a submit is accepted uses .strip(); the value actually
 written to the DB is exactly what the widget returned.
+
+Synonym expansion (Groq) is triggered from exactly three places, and
+nowhere else: creating a new column, saving a column whose requirement
+text was actually changed, and the explicit "Generate Synonyms" button.
+Opening/closing expanders, switching tabs, or any other rerun never calls
+it — see _maybe_expand_synonyms, which is the only place that does.
 """
 from __future__ import annotations
 
@@ -18,6 +24,7 @@ import sqlite3
 
 import streamlit as st
 
+from config.synonyms import expand_synonyms, merge_new_synonyms
 from db import crud
 
 
@@ -47,6 +54,30 @@ def render_config_tab(conn: sqlite3.Connection) -> None:
                 _render_column(conn, table, column, i, len(columns))
             st.divider()
             _render_add_column_form(conn, table)
+
+
+# -------------------------------------------------------- synonym expansion --
+
+
+def _maybe_expand_synonyms(conn: sqlite3.Connection, column_id: int, name: str, requirement_text: str) -> None:
+    """The one and only call site for expand_synonyms(). Always non-fatal:
+    a Groq failure only produces a toast, never an exception, never
+    blocks or reverts the column save that already happened before this
+    is called. Only ever *adds* synonyms (merge_new_synonyms) - never
+    touches an existing entry, manual or generated.
+    """
+    with st.spinner("Generating synonym suggestions..."):
+        result = expand_synonyms(name, requirement_text)
+
+    if not result.success:
+        st.toast(f"Synonym suggestion failed: {result.error}", icon="⚠️")
+        return
+
+    added = merge_new_synonyms(conn, column_id, result.synonyms)
+    if added:
+        st.toast(f"Added {len(added)} suggested synonym(s).", icon="✨")
+    else:
+        st.toast("Groq suggested synonyms, but all were already stored.", icon="ℹ️")
 
 
 # --------------------------------------------------------------- tables --
@@ -122,9 +153,16 @@ def _render_column(conn: sqlite3.Connection, table, column, index: int, total: i
             with save_col:
                 if st.button("Save column", key=f"csave_{column.id}", use_container_width=True):
                     if new_col_name.strip():
+                        # Capture before update_column overwrites it - this is
+                        # the "explicitly modified" check that gates synonym
+                        # expansion. Renaming alone (text unchanged) must NOT
+                        # trigger it.
+                        requirement_text_changed = new_req_text != column.requirement_text
                         crud.update_column(
                             conn, column.id, name=new_col_name, requirement_text=new_req_text
                         )
+                        if requirement_text_changed:
+                            _maybe_expand_synonyms(conn, column.id, new_col_name, new_req_text)
                         st.rerun()
                     else:
                         st.warning("Column name can't be blank.")
@@ -142,6 +180,16 @@ def _render_column(conn: sqlite3.Connection, table, column, index: int, total: i
 def _render_synonyms(conn: sqlite3.Connection, column) -> None:
     synonyms = crud.get_synonyms(conn, column.id)
     with st.expander(f"Synonyms ({len(synonyms)})"):
+        if st.button(
+            "✨ Generate / Suggest Synonyms", key=f"gensyn_{column.id}", use_container_width=True
+        ):
+            # Uses the currently *saved* name/requirement_text, not any
+            # unsaved edit sitting in the widgets above - regenerating
+            # against an uncommitted, possibly-discarded edit would be
+            # misleading.
+            _maybe_expand_synonyms(conn, column.id, column.name, column.requirement_text)
+            st.rerun()
+
         if not synonyms:
             st.caption("No synonyms stored yet.")
         for syn in synonyms:
@@ -178,7 +226,8 @@ def _render_add_column_form(conn: sqlite3.Connection, table) -> None:
         submitted = st.form_submit_button("Add Column")
         if submitted:
             if new_name.strip() and new_req.strip():
-                crud.create_column(conn, table.id, new_name, new_req)
+                new_column_id = crud.create_column(conn, table.id, new_name, new_req)
+                _maybe_expand_synonyms(conn, new_column_id, new_name, new_req)
                 st.rerun()
             else:
                 st.warning("Both column name and requirement text are required.")

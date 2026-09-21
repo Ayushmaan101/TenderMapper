@@ -130,13 +130,54 @@ the real default DB path (not a temp override) that the production `db/tender_ma
 created and seeded correctly on first real run, with the em dash in Item 4 verified by
 codepoint (`U+2014`) and sha256 rather than trusting terminal rendering.*
 
-### [ ] 1.4 — Config-time synonym expansion (Groq, one-time)
+### [x] 1.4 — Config-time synonym expansion (Groq, one-time)
 On configuring/saving a column, make **one** Groq call to generate alternate phrasings and
 abbreviations for its key terms; store them with the row in the DB. Not per-search-run.
 Manually editable afterwards. Handle API failure without losing the user's config edit.
 **Verify:** saving a new column populates synonyms once; re-opening the Config tab makes **no**
 further API call; manual edits to the synonym list stick; a forced API failure still saves the
 column text.
+✅ *Done 2026-09-21 — **Model substitution (user-approved):** the harness's `llama-3.3-70b-versatile`
+does not exist on this Groq account at all (confirmed live via `/models`); switched to
+`openai/gpt-oss-120b`. Same risk flagged against the not-yet-built checklist 3.2 (verification/
+rerank), also specced as Llama 3.3 70B. See PROJECT_HARNESS.md §2, §8.
+**`config/synonyms.py`:** `expand_synonyms()` never raises — every failure (missing key, any
+Groq SDK exception, malformed/empty JSON) returns a failed `SynonymExpansionResult` instead;
+retries up to 3 attempts on genuinely transient failures (rate limit, connection, timeout,
+server error, malformed JSON), not on auth/permission/not-found. `_parse_synonyms_response`
+strips markdown code fences and surrounding whitespace, accepts either the requested
+`{"synonyms": [...]}` object or a bare array, dedupes case-insensitively. `merge_new_synonyms`
+only ever *adds* rows not already present (case-insensitive) — never replaces or deletes,
+satisfying "manually added/edited synonyms are never overwritten."
+**Trigger wiring (`config/ui.py`):** exactly three call sites — column create; column save
+*only if requirement_text actually changed* (name-only edits don't trigger it); the new
+"✨ Generate / Suggest Synonyms" button per column. Every other rerun (opening/closing
+expanders, switching tabs) calls nothing. Feedback via `st.toast` (survives the immediate
+`st.rerun()` that follows every mutation); a Groq failure never blocks or reverts the column
+save, which already happened independently through `db/crud.py` first.
+**Verification — three suites, orchestrated by `tests/verify_synonyms.py`, all passing:**
+`verify_synonyms_unit.py` (24/24, no network) — response parsing edge cases, `merge_new_synonyms`
+never-overwrite behavior against a real temp DB, and every `expand_synonyms` failure path via a
+monkeypatched `config.synonyms.Groq`. `verify_synonyms_live.py` (4/4, **one real Groq call**,
+two genuinely separate OS processes) — a live call against real seeded requirement text, merged
+into a temp DB, then reopened cold in a separate process to confirm real SQLite persistence
+alongside a pre-existing manual synonym that survived untouched; this live run is what surfaced
+the `max_tokens` bug above. `verify_synonyms_ui_triggers.py` (20/20, `AppTest` with a mocked
+Groq client and a call-counter) — proves, by exact call count: add-column triggers once;
+rename-only save triggers zero times; requirement-text-changed save triggers exactly once;
+the manual button triggers on demand and merges rather than replaces (a manual synonym added
+mid-test survives a regeneration with entirely different mocked terms); repeated reruns/
+navigation with no button press trigger zero calls; a forced missing-key failure during
+column creation still saves the column correctly (exact name + requirement_text, zero
+fabricated synonyms) and raises no exception.
+**Regression fixes found along the way:** `tests/_config_ui_phase1_drive.py` (checklist 1.3)
+needed `GROQ_API_KEY` explicitly blanked, since its own "edit column 1" step now triggers real
+automatic expansion, which was shifting the hardcoded synonym ids that test's phase 2 asserted
+on — fixed by scoping that test to Config CRUD only (blanked key → expansion fails cleanly,
+per its own resilience contract). Also had to set the key to `""` rather than pop it, since
+`config/synonyms.py`'s `load_dotenv()` refills a fully-absent key from `.env` on import.
+Full regression suite (`verify_db_roundtrip`, `verify_seed`, `verify_config_ui`,
+`verify_synonyms`) passes clean end-to-end after both fixes.*
 
 ---
 

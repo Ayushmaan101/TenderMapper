@@ -10,6 +10,18 @@ db/crud.py functions against the real SQLite file.
 
 Run as its own OS process by tests/verify_config_ui.py; never imported
 directly. Exits non-zero with a message if anything raises.
+
+Deliberately blanks GROQ_API_KEY for this process (checklist 1.4 added
+automatic synonym expansion on column create/edit - see config/synonyms.py
+and config/ui.py). This test is scoped to Config CRUD, not synonym
+expansion (that has its own suite: verify_synonyms_ui_triggers.py), and a
+real live Groq call here would insert extra column_synonym rows and shift
+the ids this script's hardcoded assertions rely on. Set to "" rather than
+popped/deleted: config.synonyms calls load_dotenv() on import, and
+load_dotenv() only fills in keys that are entirely ABSENT from os.environ
+- a popped key gets silently refilled from .env on the next import, an
+explicitly blank one does not. With a blank key, expand_synonyms fails
+fast and cleanly (per its own resilience contract) instead of calling out.
 """
 import os
 import sys
@@ -19,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 DB_PATH = sys.argv[1]
 os.environ["TENDER_MAPPER_DB_PATH"] = DB_PATH
+os.environ["GROQ_API_KEY"] = ""
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
