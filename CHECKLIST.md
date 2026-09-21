@@ -80,11 +80,25 @@ quotes, no final newline) round-trips sha256-identical, a padded synonym round-t
 unstripped, and `delete_column`/`delete_table` cascade correctly (verified as real DB-level
 `ON DELETE CASCADE`, since the CRUD code never manually deletes child rows).*
 
-### [ ] 1.2 — Seed data module + first-run auto-seed
+### [x] 1.2 — Seed data module + first-run auto-seed
 Encode the exact Table 1 (10 columns) and Table 2 (13 rows) requirement text verbatim,
 line breaks preserved. Auto-seed **only** when the DB is empty.
 **Verify:** fresh DB → both tables present with exactly 10 and 13 entries, text byte-identical to
 spec; second startup does **not** re-seed or duplicate; edits made by the user survive a restart.
+✅ *Done 2026-09-21 — `seed/seed_data.py` (`SEED_SCHEMA`, all 23 items transcribed from the
+original spec; per user's explicit choice, wrapped lines are rejoined into one continuous
+paragraph per item, single-space-joined at each line break — all other text, including
+original typos/inconsistencies like Item 3's "centre" vs. other items' "Centre" and the
+mismatched parens in Item 7, preserved as-is) and `seed/seeder.py` (`is_empty`/`seed_if_empty`,
+keyed purely on a live `schema_table` row count — no separate "has ever been seeded" flag;
+noted as a flagged design choice if stricter semantics are wanted later). Verified via
+`tests/verify_seed.py` — 58/58 checks passed: empty DB → 2 tables / 23 columns created;
+every one of the 23 `requirement_text` values individually checked character-for-character
+(`==` and sha256) against `SEED_SCHEMA`; re-running `seed_if_empty` on the now-populated DB
+returns `False` and creates zero duplicates; a user edit made after seeding survives a further
+`seed_if_empty` call. Column names ("Item N" / "Document N") are a documented default
+assumption, freely renamable via the Config tab (1.3) — not part of the user's original spec.
+Not yet wired into `app.py`; that lands in 1.3 (Config tab UI) once there's a UI to seed into.*
 
 ### [ ] 1.3 — Config tab UI
 Dedicated Config tab: add/remove tables, add/remove/reorder columns, edit column names and
