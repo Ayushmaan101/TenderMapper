@@ -1,8 +1,10 @@
 """AIIMS Tender Compliance Mapper — Streamlit entry point.
 
-Checklist 1.3: the Config tab is now live, backed by db/crud.py, with the
-DB schema created and the one-time seed applied at app startup. The Run
-tab is still a placeholder — see CHECKLIST.md phases 2-4.
+Checklist 1.3: the Config tab is live, backed by db/crud.py. Checklist
+2.1: the Run tab's upload section is live, backed by ingest/pipeline.py -
+purely session-scoped, touches no SQLite state. The rest of the Run tab
+(resolution pipeline, results table, "Next Company" reset) is still a
+placeholder — see CHECKLIST.md phases 2-4.
 """
 import os
 
@@ -11,6 +13,7 @@ import streamlit as st
 from config.ui import render_config_tab
 from db.connection import DEFAULT_DB_PATH, get_connection
 from db.schema import init_db
+from ingest.ui import render_upload_section
 from seed.seeder import seed_if_empty
 
 st.set_page_config(
@@ -52,10 +55,11 @@ with run_tab:
         "Reads the current persisted config; read-only here (edit via the "
         "Config tab)."
     )
+    st.text_input("Company name", key="company_name")
+    render_upload_section()
     st.info(
-        "Placeholder — upload handling, the resolution pipeline, the "
-        "results table, and the “Next Company” reset are not built "
-        "yet. See CHECKLIST.md phases 2–4."
+        "Placeholder — the resolution pipeline, results table, and "
+        "“Next Company” reset are not built yet. See CHECKLIST.md phases 2–4."
     )
 
 with config_tab:

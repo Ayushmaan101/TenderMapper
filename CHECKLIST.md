@@ -183,11 +183,47 @@ Full regression suite (`verify_db_roundtrip`, `verify_seed`, `verify_config_ui`,
 
 ## Phase 2 — Ingest & text extraction
 
-### [ ] 2.1 — Upload + zip/folder handling
+### [x] 2.1 — Upload + zip/folder handling
 Accept all three input modes: a zip, a folder, and multiple separate PDF files. Normalize to a
 session-scoped list of `(pdf_name, bytes/path)`. Reject non-PDFs with a clear message.
 **Verify:** all three modes produce the same normalized PDF list; a nested zip of folders works;
 a zip containing non-PDFs skips them with a visible warning.
+✅ *Done 2026-09-21 — **`ingest/pipeline.py`** (`normalize_uploads`, zero dependency on Streamlit
+or `db/`): accepts loose PDFs and/or `.zip` archives from `st.file_uploader(accept_multiple_files=True)`
+— a dropped/multi-selected folder collapses to the same "many files" path in the browser, so all
+three input modes are handled by one code path. Zip handling is recursive (zip-in-zip, bounded
+`MAX_ZIP_DEPTH=5`), filters macOS junk (`__MACOSX/`, `.DS_Store`, `._*` AppleDouble forks)
+silently (no warning spam for noise the user didn't create), and rejects unsafe entry paths
+(absolute paths, drive letters, `..` traversal, embedded NUL) as an explicit Zip Slip guard even
+though this module never writes to disk today. A `.pdf`-named file whose content doesn't start
+with `%PDF-` is rejected, not silently trusted. Size/count budgets
+(`MAX_TOTAL_UNCOMPRESSED_BYTES=1 GiB`, `MAX_TOTAL_ENTRIES=5000`, both overridable) guard against
+zip bombs, shared across an entire upload batch. Filename collisions (same name from two
+sources) are resolved by auto-renaming the later one (`invoice (2).pdf`) with a warning
+explaining why, never by silently dropping one.
+**`ingest/ui.py`** wires this to `st.session_state` only (`ingested_documents`,
+`ingest_warnings`) — zero `db/` imports, zero SQLite calls. Re-normalizes only when the upload
+selection's (name, size) signature actually changes, not on every unrelated rerun elsewhere in
+the app (e.g. editing something in the Config tab). Wired into `app.py`'s Run tab alongside a
+company-name field (a small proactive step toward the Main Workflow's step 2 in
+PROJECT_HARNESS.md §5, beyond 2.1's literal scope but low-cost and already-approved shape).
+**Verification — two suites, orchestrated by `tests/verify_ingest.py`, both passing:**
+`verify_ingest_unit.py` (39/39, no Streamlit) — direct single/multi PDF uploads; a zip with
+PDFs nested several folders deep; a zip mixing valid PDFs with `.png`/`.docx` (each producing
+its own named warning, valid PDFs still extracted cleanly); macOS junk silently filtered;
+zip-in-zip recursion; four distinct Zip Slip payloads (`../../evil.pdf`, `/etc/evil.pdf`,
+backslash traversal, a drive-letter path) all rejected with none reaching the output; a corrupt
+zip rejected cleanly; a fake-content `.pdf` rejected; three-way and cross-source (direct upload
+vs. zip entry) filename collisions resolved by sequential renaming without data loss; both
+safety-budget limits proven to stop processing early rather than hang/crash.
+`verify_ingest_ui.py` (13/13, real `AppTest` file-upload simulation via `.upload()`) — a mixed
+zip populates `session_state` with exactly the 2 valid PDFs and 1 warning; a call-counter on
+`normalize_uploads` proves it fires exactly once on upload and zero additional times across 3
+idle reruns; a before/after fingerprint of every table/column/synonym in the real config DB is
+byte-identical across the whole upload flow, proving session state is fully isolated from
+SQLite; clearing the upload clears session state back to empty and triggers exactly one more
+call. Full regression suite (`verify_db_roundtrip`, `verify_seed`, `verify_config_ui`,
+`verify_synonyms`, `verify_ingest`) passes clean end-to-end.*
 
 ### [ ] 2.2 — Text-layer pre-check (PyMuPDF)
 Per page, `get_text()`; decide "usable text layer" vs "needs OCR" with a documented threshold.
