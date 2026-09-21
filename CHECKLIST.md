@@ -260,12 +260,47 @@ minimal raw PDF byte string) confirming graceful handling of the "zero-page PDFs
 CHECKLIST.md 5.1 flags for later. Full regression suite (`verify_db_roundtrip`, `verify_seed`,
 `verify_config_ui`, `verify_synonyms`, `verify_ingest`, `verify_text_check`) passes clean.*
 
-### [ ] 2.3 — OCR pipeline (PaddleOCR primary, Tesseract fallback)
+### [x] 2.3 — OCR pipeline (PaddleOCR primary, Tesseract fallback)
 Rasterize needs-OCR pages via PyMuPDF and OCR them. PaddleOCR primary; fall back to Tesseract on
 failure/unavailability. Cache per (pdf, page) so re-runs within a session don't re-OCR. Surface
 progress in the UI — this is the slow step.
 **Verify:** a scanned PDF yields non-empty text per page; forcing PaddleOCR to fail routes to
 Tesseract and still returns text; a second run within the session hits cache, not OCR.
+✅ *Done 2026-09-21 — **`ocr/pipeline.py`**: `rasterize_page` (PyMuPDF `get_pixmap` at 200 dpi,
+`zoom = dpi/72`, no temp files, returns a PIL Image); `ocr_page` (PaddleOCR first, Tesseract on
+any exception, `engine="failed"` with both error messages if both fail — never raises itself);
+`resolve_pdf_text` (the real per-PDF orchestrator: reuses checklist 2.2's pre-check to route
+each page to `engine="native"` — no OCR engine invoked at all — or to `ocr_page`, with an
+optional caller-supplied cache dict keyed `(pdf_name, page_number)` and an optional
+`progress_callback(pages_done, pages_total)`; Streamlit-free throughout — the caller, e.g.
+`st.session_state`, owns the actual cache/progress wiring). Immutable `OcrPageResult`
+(`pdf_name, page_number, text, engine, success, error`) — engine is one of `"native"`,
+`"paddleocr"`, `"tesseract"`, `"failed"`.
+**Two real environment issues found and fixed** (documented in PROJECT_HARNESS.md §7/§8, not
+just here): (1) `PaddleOCR(...).predict()` crashed on every call on this machine with oneDNN
+acceleration on (a Paddle-internal PIR/oneDNN bug in the detection model, not project code) —
+fixed with `enable_mkldnn=False`, required in production, not just for tests; (2)
+`use_doc_orientation_classify`/`use_doc_unwarping` (correction for photographed/warped
+documents) were observed to zero out detection entirely on a clean synthetic test page —
+disabled by default, since this project's real input is office-scanned PDFs, not phone
+photos, and the risk outweighed the marginal value here; `use_textline_orientation=True`
+(the user's spec) kept on as the lighter-weight, lower-risk correction. `Pillow`/`numpy` added
+to `requirements.txt` as explicit direct dependencies (already installed transitively).
+**Verification — `tests/verify_ocr_pipeline.py`, 34/34.** Two tests use the REAL engines
+against a genuinely "scanned" synthetic PDF (real text rendered once, then re-embedded as a
+plain image with no extractable text layer, so the pipeline has no choice but to actually OCR
+it): real PaddleOCR success with correct extracted text; a forced PaddleOCR failure (a real
+raised exception, not a mocked success) correctly falling back to the real Tesseract binary,
+which correctly extracts the text. Routing/caching/progress logic — the parts that are about
+pipeline correctness, not OCR accuracy — use fast monkeypatched engines with a call counter to
+stay deterministic and quick: both-engines-fail handling; an all-digital PDF never invoking
+either OCR engine; a blank page resolving to empty native text with zero OCR calls; a 5-page
+mixed PDF resolving the exact per-page native/OCR pattern with OCR invoked exactly 3 times;
+the progress callback firing once per page in strict increasing order; a cache hit returning
+the identical cached result object with zero additional OCR calls, contrasted directly against
+`cache=None` re-invoking OCR every time; and the cache key proven to be genuinely
+`(pdf_name, page_number)` (two scanned pages in one PDF produce two distinct entries, each hit
+independently on re-run). Full regression suite (all 7 test files) passes clean.*
 
 ### [ ] 2.4 — Section/clause reference extraction
 During extraction/OCR, separately index "Section X, Clause Y" style references per page as a

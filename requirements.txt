@@ -18,10 +18,17 @@ paddlepaddle==3.3.1
 paddleocr==3.7.0
 
 # --- OCR: fallback ---
-# pytesseract is only a WRAPPER. The Tesseract binary is NOT a pip package and
-# is NOT currently installed on this machine. Install the UB-Mannheim Windows
-# build separately and put it on PATH (or set pytesseract.pytesseract.tesseract_cmd).
+# pytesseract is only a WRAPPER. The Tesseract binary is NOT a pip package;
+# install the UB-Mannheim Windows build separately (confirmed installed at
+# C:\Program Files\Tesseract-OCR\tesseract.exe as of checklist 0.5) and point
+# pytesseract at it via TESSERACT_CMD (see .env.example) or PATH.
 pytesseract==0.3.13
+
+# --- OCR: rasterization bridge (PyMuPDF pixmap -> PaddleOCR/pytesseract input) ---
+# Both were already installed transitively via paddlepaddle; pinned explicitly
+# here as of checklist 2.3 because ocr/pipeline.py now imports them directly.
+Pillow==12.3.0
+numpy==2.3.5
 
 # --- Retrieval ---
 # rank_bm25 ships no tokenizer; tokenization is ours to own.
