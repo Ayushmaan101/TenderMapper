@@ -1,0 +1,38 @@
+# AIIMS Tender Compliance Mapper — pinned dependencies
+# Python 3.11 (conda env: tender-mapper)
+# Versions resolved against live PyPI on 2026-09-21.
+# See PROJECT_HARNESS.md §7 for per-package install friction on Windows.
+
+# --- App framework ---
+streamlit==1.64.0
+
+# --- PDF handling (import name is `fitz`) ---
+pymupdf==1.28.2
+
+# --- OCR: primary ---
+# INSTALL ORDER MATTERS: install paddlepaddle first, alone, and verify it
+# (`python -c "import paddle; paddle.utils.run_check()"`) before paddleocr.
+# paddleocr 3.x is version-coupled to paddlepaddle 3.x.
+# paddleocr downloads model weights on FIRST USE, not at install time.
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+
+# --- OCR: fallback ---
+# pytesseract is only a WRAPPER. The Tesseract binary is NOT a pip package and
+# is NOT currently installed on this machine. Install the UB-Mannheim Windows
+# build separately and put it on PATH (or set pytesseract.pytesseract.tesseract_cmd).
+pytesseract==0.3.13
+
+# --- Retrieval ---
+# rank_bm25 ships no tokenizer; tokenization is ours to own.
+rank_bm25==0.2.2
+rapidfuzz==3.14.6
+
+# --- LLM: config-time synonym expansion + candidate verification/rerank ---
+groq==1.7.0
+
+# --- Export ---
+openpyxl==3.1.5
+
+# --- Secrets ---
+python-dotenv==1.2.3
