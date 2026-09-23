@@ -530,12 +530,48 @@ show a warning and never invoke a search at all. Full regression suite (all 12 t
 including checklist 4.1's own suite updated for the new "Status" column) passes clean; also
 confirmed against the real production DB.*
 
-### [ ] 4.3 — Session reset ("Next Company")
+### [x] 4.3 — Session reset ("Next Company")
 Build session-state management explicitly around the company-in → resolve → review →
 "Next Company" loop. The button clears company name, uploads, and results; leaves config
 untouched; returns to a fresh upload state.
 **Verify:** after clicking, all four clear conditions hold, config is byte-identical to before,
 and a second company can be processed immediately in the same session with no stale state.
+✅ *Done 2026-09-23 — **New `run/session_reset.py`**: `render_next_company_button()` +
+`_reset_for_next_company` callback. Uses `st.button(..., on_click=...)` rather than an inline
+`if st.button(...)`, specifically because resetting the `company_name` text_input's displayed
+value requires mutating its widget-backing session-state key **before** that widget re-renders
+on the next script pass — Streamlit only permits this from within an `on_click` callback, not
+from the main script body after the widget has already been instantiated earlier in the same run
+(which it always has, since it renders above the results section this button sits beneath).
+**File-uploader widget reset**: Streamlit has no direct "clear" API for `st.file_uploader`.
+`ingest/ui.py` now keys the uploader dynamically (`company_file_uploader_{generation}`);
+`reset_upload_state()` bumps the generation counter, forcing Streamlit to instantiate a brand-new
+widget with no memory of prior selections (in both `session_state` and the browser's own DOM) —
+the standard, documented workaround, and literally what the checklist asked for ("widget keys...
+properly cycled"). The old generation's now-orphaned session-state entry is harmless and left
+alone.
+**Session-state contract completed**: `run/results.py` gains `OCR_CACHE_KEY` (the cache
+checklist 2.3's `ocr.pipeline.resolve_pdf_text(cache=...)` parameter expects) alongside the
+`corpus_index`/`page_texts`/`reference_index` keys already defined in 4.2, plus `reset_run_state()`
+clearing all four. Nothing in `run/session_reset.py` imports `db.crud` or opens a
+`sqlite3.Connection` — it cannot touch the config DB even by accident, not just by convention.
+**Verification — `tests/verify_next_company_reset.py`, 27/27 (AppTest), full-cycle simulation**:
+ingests Company A (name, an uploaded PDF, mock resolved results spanning both high- and
+low-confidence, and a hand-populated search-index session-state contract matching what checklist
+3.3 will produce), clicks "Next Company", then asserts **all four clear conditions** — company
+name (both the session-state key *and* the widget's own displayed value), uploaded documents/
+warnings/the uploader widget itself (confirmed via the key generation cycling from `_0` to `_1`,
+not merely its value), `resolution_results` (every entry verified functionally blank — see the
+test's own note on why the dict isn't literally `{}` immediately: `run/results.py`'s own
+read-back-and-write-back persistence cycle from 4.1 repopulates it with blank-equivalent entries
+on the very next render, which is correct, not a leak), and the full search-index contract
+(`corpus_index`/`page_texts`/`reference_index`/`ocr_cache`, all reset to `None`/`{}`). Also
+asserts the **config DB fingerprint is byte-identical** across the whole cycle — before Company A
+ever touched it and after its full reset — and that **Company B loads with zero residual state**:
+its upload is the *only* document present, explicitly checked for no `"CompanyA"` trace anywhere.
+One real regression surfaced and fixed: checklist 2.1's own upload test hardcoded the (now
+dynamic) uploader key — updated to the generation-0 key in the same commit. Full regression suite
+(all 13 test files) passes clean; also confirmed against the real production DB.*
 
 ### [ ] 4.4 — Excel export (openpyxl)
 Export the (possibly reviewer-edited) results to Excel matching the configured schema.

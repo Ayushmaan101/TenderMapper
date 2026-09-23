@@ -102,7 +102,7 @@ def main() -> None:
             "logo.png": b"\x89PNG fake bytes",
             "certificate.pdf": pdf_bytes("cert"),
         })
-        at.get_by_key("company_file_uploader").upload("CompanyDocs.zip", zip_bytes, "application/zip")
+        at.get_by_key("company_file_uploader_0").upload("CompanyDocs.zip", zip_bytes, "application/zip")
         at.run()
         check("upload a mixed zip -> no exception", not at.exception)
         check("upload a mixed zip -> normalize_uploads called exactly once", len(call_log) == 1)
@@ -131,7 +131,7 @@ def main() -> None:
         check("config DB still has the seeded 2 tables (ingest didn't wipe or add anything)", len(fingerprint_after_upload) == 2)
 
         # --- clearing the upload clears session state ---
-        at.get_by_key("company_file_uploader").clear()
+        at.get_by_key("company_file_uploader_0").clear()
         at.run()
         check("clearing the upload -> normalize_uploads called again (selection changed)", len(call_log) == 2)
         check("clearing the upload -> session_state documents empty", at.session_state.get("ingested_documents") == [])

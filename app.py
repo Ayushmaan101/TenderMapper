@@ -3,10 +3,10 @@
 Checklist 1.3: the Config tab is live, backed by db/crud.py. Checklist
 2.1: the Run tab's upload section is live, backed by ingest/pipeline.py -
 purely session-scoped, touches no SQLite state. Checklist 4.1: the
-results table is live, backed by run/results.py. The actual per-column
-resolution loop (checklist 3.3 - running search+verify for every
-configured column) and the "Next Company" reset (checklist 4.3) are
-still placeholders — see CHECKLIST.md phases 3-4.
+results table is live, backed by run/results.py. Checklist 4.3: the
+"Next Company" reset is live, backed by run/session_reset.py. The actual
+per-column resolution loop (checklist 3.3 - running search+verify for
+every configured column) is still a placeholder — see CHECKLIST.md phase 3.
 """
 import os
 
@@ -17,6 +17,7 @@ from db.connection import DEFAULT_DB_PATH, get_connection
 from db.schema import init_db
 from ingest.ui import render_upload_section
 from run.results import render_results_section
+from run.session_reset import render_next_company_button
 from seed.seeder import seed_if_empty
 
 st.set_page_config(
@@ -68,9 +69,10 @@ with run_tab:
         "directly — edits persist for this session."
     )
     render_results_section(conn)
+    render_next_company_button()
     st.info(
-        "Placeholder — the per-column resolution loop and the “Next Company” reset "
-        "are not built yet. See CHECKLIST.md phases 3–4."
+        "Placeholder — the per-column resolution loop is not built yet. "
+        "See CHECKLIST.md phase 3."
     )
 
 with config_tab:

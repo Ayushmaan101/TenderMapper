@@ -53,10 +53,24 @@ config DB - the session-state keys below are the CONTRACT checklist
   CORPUS_INDEX_KEY     -> a search.bm25_index.CorpusIndex
   PAGE_TEXTS_KEY        -> dict[(pdf_name, page_number), str]
   REFERENCE_INDEX_KEY   -> an ocr.references.ReferenceIndex (optional)
+  OCR_CACHE_KEY          -> dict[(pdf_name, page_number), OcrPageResult],
+                            the cache checklist 2.3's
+                            ocr.pipeline.resolve_pdf_text(cache=...)
+                            parameter expects - owned here since it's
+                            part of the same per-company search-index
+                            lifecycle as the three keys above
 
 Until 3.3 populates them, a manual re-search click surfaces a clear "no
 documents processed yet" message instead of crashing - the same
 graceful-placeholder posture as the rest of this module.
+
+Session reset (checklist 4.3)
+---------------------------------
+reset_run_state() clears every key in the contract above, plus
+RESULTS_KEY - called by run/session_reset.py's "Next Company" handler.
+Resets to `None`/`{}` rather than deleting the keys outright, so any
+code that reads them via st.session_state[...] (not .get(...)) keeps
+working immediately after a reset without a KeyError.
 
 The reviewer's custom terms drive BM25 RETRIEVAL only (query =
 tokenize(custom_terms) alone, no stored synonyms mixed in - the
@@ -90,6 +104,7 @@ RESULTS_KEY = "resolution_results"  # st.session_state[RESULTS_KEY]: dict[int, V
 CORPUS_INDEX_KEY = "corpus_index"  # st.session_state[CORPUS_INDEX_KEY]: search.bm25_index.CorpusIndex | None
 PAGE_TEXTS_KEY = "page_texts"  # st.session_state[PAGE_TEXTS_KEY]: dict[(pdf_name, page_number), str]
 REFERENCE_INDEX_KEY = "reference_index"  # st.session_state[REFERENCE_INDEX_KEY]: ocr.references.ReferenceIndex | None
+OCR_CACHE_KEY = "ocr_cache"  # st.session_state[OCR_CACHE_KEY]: dict[(pdf_name, page_number), OcrPageResult]
 
 CONFIDENCE_THRESHOLD = 0.70
 
@@ -97,6 +112,20 @@ _BLANK_RESULT = VerificationResult(
     pdf_name="", page_number_or_range="", confidence=0.0, match_snippet="",
     reasoning="", success=False, error=None,
 )
+
+
+def reset_run_state() -> None:
+    """Clears every session-state key this module's search-index
+    contract owns: resolved results, the BM25 corpus index, extracted
+    page texts, the reference index, and the OCR cache. Called by
+    run/session_reset.py's "Next Company" handler. Touches nothing in
+    db/crud.py or the SQLite connection.
+    """
+    st.session_state[RESULTS_KEY] = {}
+    st.session_state[CORPUS_INDEX_KEY] = None
+    st.session_state[PAGE_TEXTS_KEY] = {}
+    st.session_state[REFERENCE_INDEX_KEY] = None
+    st.session_state[OCR_CACHE_KEY] = {}
 
 
 def is_flagged(result: VerificationResult) -> bool:
