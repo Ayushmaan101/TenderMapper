@@ -38,6 +38,7 @@ in the cache is never re-OCR'd.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable, MutableMapping, Optional
 
@@ -112,13 +113,32 @@ def _ocr_with_paddle(image: Image.Image) -> str:
 # ------------------------------------------------------------ tesseract --
 
 
-def _ocr_with_tesseract(image: Image.Image) -> str:
-    import os
+def _resolve_tesseract_cmd() -> str:
+    """Locate the Tesseract binary without assuming any one OS.
 
+    Priority: an explicit TESSERACT_CMD env var always wins (works on any
+    platform); then shutil.which("tesseract") (resolves the standard
+    /usr/bin/tesseract that `packages.txt`'s `tesseract-ocr` apt package
+    installs on Streamlit Community Cloud, or any other Linux/Mac box with
+    Tesseract on PATH); only as a last resort, the Windows UB-Mannheim
+    build's default install location, since that's this project's own
+    local dev environment (checklist 0.5) and a reasonable final guess.
+    """
+    import shutil
+
+    env_cmd = os.environ.get("TESSERACT_CMD", "").strip()
+    if env_cmd:
+        return env_cmd
+    which_cmd = shutil.which("tesseract")
+    if which_cmd:
+        return which_cmd
+    return r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+
+def _ocr_with_tesseract(image: Image.Image) -> str:
     import pytesseract
 
-    tess_cmd = os.environ.get("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-    pytesseract.pytesseract.tesseract_cmd = tess_cmd
+    pytesseract.pytesseract.tesseract_cmd = _resolve_tesseract_cmd()
     return pytesseract.image_to_string(image)
 
 

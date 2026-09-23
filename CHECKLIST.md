@@ -140,7 +140,7 @@ column text.
 ✅ *Done 2026-09-21 — **Model substitution (user-approved):** the harness's `llama-3.3-70b-versatile`
 does not exist on this Groq account at all (confirmed live via `/models`); switched to
 `openai/gpt-oss-120b`. Same risk flagged against the not-yet-built checklist 3.2 (verification/
-rerank), also specced as Llama 3.3 70B. See PROJECT_HARNESS.md §2, §8.
+rerank), also specced as Llama 3.3 70B. See PROJECT_HARNESS.md §2, §9.
 **`config/synonyms.py`:** `expand_synonyms()` never raises — every failure (missing key, any
 Groq SDK exception, malformed/empty JSON) returns a failed `SynonymExpansionResult` instead;
 retries up to 3 attempts on genuinely transient failures (rate limit, connection, timeout,
@@ -276,7 +276,7 @@ optional caller-supplied cache dict keyed `(pdf_name, page_number)` and an optio
 `st.session_state`, owns the actual cache/progress wiring). Immutable `OcrPageResult`
 (`pdf_name, page_number, text, engine, success, error`) — engine is one of `"native"`,
 `"paddleocr"`, `"tesseract"`, `"failed"`.
-**Two real environment issues found and fixed** (documented in PROJECT_HARNESS.md §7/§8, not
+**Two real environment issues found and fixed** (documented in PROJECT_HARNESS.md §7/§9, not
 just here): (1) `PaddleOCR(...).predict()` crashed on every call on this machine with oneDNN
 acceleration on (a Paddle-internal PIR/oneDNN bug in the detection model, not project code) —
 fixed with `enable_mkldnn=False`, required in production, not just for tests; (2)
@@ -394,7 +394,7 @@ JSON, rate limits, and retries. Batch/parallelize sensibly — this runs per col
 confidence; malformed model output is caught and retried rather than crashing the run.
 ✅ *Done 2026-09-23 — Model: `openai/gpt-oss-120b` (same substitution as 1.4, kept consistent
 across both Groq call sites — `llama-3.3-70b-versatile` still doesn't exist on this account;
-PROJECT_HARNESS.md §2/§8 updated to drop the "unconfirmed" flag left on this row after 1.4).
+PROJECT_HARNESS.md §2/§9 updated to drop the "unconfirmed" flag left on this row after 1.4).
 **`verify/groq_verifier.py`**: `verify_candidate` (single candidate, never raises — every
 failure falls back to a `VerificationResult` with `confidence=0.0`, the candidate's own BM25
 snippet kept as visible context, and a reasoning string flagging it for human review),
@@ -745,8 +745,52 @@ manual re-search) — the app remains fully interactive afterward, confirmed by 
 successful interaction. Full regression suite (all 15 test files) passes clean; also confirmed
 against the real production DB.*
 
-### [ ] 5.2 — Streamlit Community Cloud deployment config
-`packages.txt` (Tesseract via apt), `requirements.txt` pinned for Linux, `.streamlit/config.toml`,
-secrets handling for `GROQ_API_KEY`. Confirm whether PaddleOCR fits Community Cloud's resource
-ceiling — if it does not, **report back before changing the stack**.
-**Verify:** app builds and runs on Community Cloud; OCR path works there; secrets resolve.
+### [x] 5.2 — Streamlit Community Cloud deployment config
+✅ *Done 2026-09-23 — new `packages.txt` (repo root): `tesseract-ocr` (the OCR-fallback system
+binary — `pytesseract` is only a wrapper, see §7's `pytesseract` row) plus `libgl1`,
+`libglib2.0-0`, `libsm6`, `libxext6`, `libxrender1` — headless graphics libs
+`opencv-contrib-python` (pulled in transitively by `paddleocr`/`paddlepaddle`) needs just to
+**import** on a minimal Debian container. `requirements.txt` needed no changes — nothing in it
+is platform-pinned; pip already resolves Linux wheels for every listed version on a Linux box.
+**Cross-platform Tesseract pathing:** `ocr/pipeline.py` gained `_resolve_tesseract_cmd()` —
+priority order is an explicit `TESSERACT_CMD` env var (any platform), then
+`shutil.which("tesseract")` (resolves `packages.txt`'s apt-installed `/usr/bin/tesseract` on
+Community Cloud), only then the Windows UB-Mannheim default as a last resort. This was the only
+hardcoded OS-specific path anywhere in the source tree (confirmed by grepping the whole
+codebase for `C:\`) — `db/connection.py`'s `DEFAULT_DB_PATH` was already `pathlib.Path`-based
+and needed no change.
+**Secrets:** `config/synonyms.py` and `verify/groq_verifier.py` stay Streamlit-free (§2) and
+keep reading `GROQ_API_KEY` via plain `os.environ.get(...)`, unchanged — rather than importing
+`streamlit` into either (which would break that deliberate layering and their standalone
+unit-testability), new `run/secrets_bootstrap.py::bootstrap_groq_api_key()` bridges
+`st.secrets["GROQ_API_KEY"]` into `os.environ` once at `app.py` startup, **only** when
+`GROQ_API_KEY` isn't already set — local dev (`.env` via `python-dotenv`) never even touches
+`st.secrets`. New `.streamlit/secrets.toml.example` documents the format; confirmed via
+`git check-ignore -v` that `.gitignore`'s existing `.streamlit/secrets.toml` rule matches only
+the real file, not the `.example` variant (no `.gitignore` change was needed — it already had
+this rule from checklist 0.6).
+**PaddleOCR resource ceiling — reporting back, per this item's own instruction:** this checklist
+item does not deploy the app for real, so Community Cloud's actual resource ceiling against
+PaddleOCR's footprint remains **unverified**, not solved — flagged as an explicit open risk in
+both PROJECT_HARNESS.md §8 and README.md rather than silently assumed fine. If a real deployment
+shows it doesn't fit, the options (paid tier vs. Tesseract-primary for cloud) both change the
+stack and need a go-ahead first, not a unilateral fix.
+**A second real risk found and documented, not previously called out**: Community Cloud's
+container filesystem is ephemeral, so `db/tender_mapper.db` resets to freshly-seeded on every
+redeploy/restart — any Config-tab edits away from the seeded schema are silently lost across a
+restart. Not a regression against anything the spec promised (§2 only ever meant
+single-session persistence), but a real operational gap worth surfacing before this goes in
+front of real users.
+**Verification — two suites, orchestrated by `tests/verify_deployment_config.py`, both
+passing**: `verify_deployment_config_unit.py` (7/7, no Streamlit) — `TESSERACT_CMD` env var
+wins outright; with it unset, a monkeypatched `shutil.which` simulating a genuine Linux hit is
+used; with neither, falls back to the Windows default without raising; the secrets bridge
+leaves an already-set `GROQ_API_KEY` untouched without ever consulting `st.secrets`, correctly
+copies a value across when absent from the environment but present in a fake `st.secrets`, and
+doesn't crash when a fake `st.secrets.get` raises (simulating no `secrets.toml` at all).
+`verify_deployment_config_ui.py` (3/3, `AppTest`) — confirms against the dev machine's real,
+genuinely-absent `.streamlit/secrets.toml` (no mock) that the real `st.secrets` object doesn't
+crash app startup, and that the app stays fully interactive afterward. **Full regression suite
+(18 top-level test files, the widest run yet in this project) passes clean; also confirmed
+against the real production DB** via a direct `AppTest` boot with `st.cache_resource.clear()`
+first.*

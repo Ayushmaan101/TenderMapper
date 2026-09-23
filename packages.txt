@@ -1,0 +1,16 @@
+# System (apt) dependencies for Streamlit Community Cloud's Debian container.
+# pip-only entries belong in requirements.txt instead - this file is for
+# binaries/shared libraries that aren't Python packages.
+
+# OCR fallback (checklist 3.2's PaddleOCR is primary; pytesseract just
+# wraps this binary, which is not a pip package - see ocr/pipeline.py).
+tesseract-ocr
+
+# Headless graphics libs opencv-contrib-python (pulled in transitively by
+# paddleocr/paddlepaddle) needs to import at all on a minimal Debian
+# container with no X server / desktop libs preinstalled.
+libgl1
+libglib2.0-0
+libsm6
+libxext6
+libxrender1

@@ -56,8 +56,8 @@ See §6 (Explicit Non-Goals) for the full list.
 | OCR (fallback) | **Tesseract** (via `pytesseract`) | Free, open-source, no API cost. Used when PaddleOCR fails/unavailable. |
 | Search / retrieval | **BM25 (`rank_bm25`)** over extracted+OCR'd page text | |
 | Fuzzy term matching | **`rapidfuzz`** | Handles term variants / OCR noise |
-| Synonym expansion | **Groq (`openai/gpt-oss-120b`), one-time at config-time** | See §4. Model substituted from the originally-planned Llama 3.3 70B — see §8 Change Log, 2026-09-21. |
-| Verification / rerank | **Groq (`openai/gpt-oss-120b`)** | Structured JSON output (`pdf_name, page_number_or_range, confidence, match_snippet, reasoning`). See §3 step 7. Model substituted from the originally-planned Llama 3.3 70B for the same reason as synonym expansion (§8, checklist 1.4) — kept consistent across both Groq call sites per explicit approval, checklist 3.2. |
+| Synonym expansion | **Groq (`openai/gpt-oss-120b`), one-time at config-time** | See §4. Model substituted from the originally-planned Llama 3.3 70B — see §9 Change Log, 2026-09-21. |
+| Verification / rerank | **Groq (`openai/gpt-oss-120b`)** | Structured JSON output (`pdf_name, page_number_or_range, confidence, match_snippet, reasoning`). See §3 step 7. Model substituted from the originally-planned Llama 3.3 70B for the same reason as synonym expansion (§9, checklist 1.4) — kept consistent across both Groq call sites per explicit approval, checklist 3.2. |
 | Config storage | **SQLite** | User-scoped, persists across runs and restarts |
 | Results editing | **`st.data_editor`** | Reviewer can correct flagged/wrong cells |
 | Export | **Excel via `openpyxl`** | Matches the configured schema |
@@ -443,14 +443,93 @@ go-ahead first.
 | **`groq`** | Low risk. Needs `GROQ_API_KEY` via `.env` / `python-dotenv`. | Key not yet provided. |
 | **`rapidfuzz` / `openpyxl` / `python-dotenv`** | Low risk — prebuilt wheels, no native build step. | — |
 
-**Deployment note:** Streamlit Community Cloud runs Linux, not Windows. PaddleOCR's size and
-Tesseract's system-binary requirement both matter there — Community Cloud has a resource
-ceiling, and Tesseract needs a `packages.txt` `apt` entry rather than a pip entry. This is
-called out as a real risk against the deployment checklist item, not a solved problem.
+---
+
+## 8. Deployment (Streamlit Community Cloud) — checklist 5.2
+
+Streamlit Community Cloud runs Linux (Debian), not Windows — this project's own dev
+environment (§7). Everything below exists to make the same codebase run correctly on both
+without a fork or a manual per-platform edit.
+
+### Config files Community Cloud reads automatically
+
+- **`packages.txt`** (repo root) — apt packages Community Cloud installs before `pip install
+  -r requirements.txt`. Contains `tesseract-ocr` (the OCR-fallback system binary; `pytesseract`
+  is only a Python wrapper around it — see §7's `pytesseract` row) and the headless graphics
+  libs (`libgl1`, `libglib2.0-0`, `libsm6`, `libxext6`, `libxrender1`) that
+  `opencv-contrib-python` (pulled in transitively by `paddleocr`/`paddlepaddle`) needs just to
+  **import**, let alone run, on a minimal Debian container with no desktop libs preinstalled.
+- **`.streamlit/secrets.toml.example`** — documents the one secret this app needs
+  (`GROQ_API_KEY`) without committing a real value. `.streamlit/secrets.toml` itself (the real
+  file, if a developer creates one locally to test the `st.secrets` path) stays in `.gitignore`
+  (confirmed with `git check-ignore -v` — the exact-path rule matches the real file, not the
+  `.example` variant).
+
+### Cross-platform Tesseract pathing
+
+`ocr/pipeline.py::_resolve_tesseract_cmd()` resolves the binary in priority order: (1) an
+explicit `TESSERACT_CMD` env var, any platform; (2) `shutil.which("tesseract")`, which finds
+the standard `/usr/bin/tesseract` that `packages.txt`'s apt install puts on `PATH` on Community
+Cloud (or any Linux/Mac box with Tesseract on `PATH`); (3) only as a last resort, the Windows
+UB-Mannheim default install path, since that's this project's own local dev machine. Verified
+by `tests/verify_deployment_config_unit.py` under all three branches, with `shutil.which`
+monkeypatched to simulate a Linux hit and a total miss — the test asserts on behavior, not on
+which OS it happens to run under, so it passes identically here and on real Linux CI.
+
+### Secrets
+
+Community Cloud has no `.env` file — secrets are set through its dashboard's "Settings →
+Secrets" panel (paste the same `KEY = "value"` TOML syntax as `.streamlit/secrets.toml.example`)
+and surfaced to a running app only via `st.secrets`. `config/synonyms.py` and
+`verify/groq_verifier.py` are deliberately Streamlit-free (§2) and both already read
+`GROQ_API_KEY` via a plain `os.environ.get(...)`, populated locally by `python-dotenv`'s
+`load_dotenv()` from `.env`. Rather than importing `streamlit` into either of those two
+pipeline modules (which would break that deliberate layering and their standalone
+unit-testability), `run/secrets_bootstrap.py::bootstrap_groq_api_key()` — a small,
+Streamlit-importing bridge module, called once from `app.py` at startup — copies
+`st.secrets["GROQ_API_KEY"]` into `os.environ` **only if `GROQ_API_KEY` isn't already set**, so
+local dev (where it's already set via `.env`) is completely unaffected and never even consults
+`st.secrets`. `st.secrets` raising when no `secrets.toml` exists at all (the normal local-dev
+case) is caught and treated as "nothing to bridge", not an error — verified against the *real*
+`st.secrets` object (no mock) by `tests/verify_deployment_config_ui.py`, since this dev machine
+genuinely has no `.streamlit/secrets.toml` on disk.
+
+### Deploying
+
+1. Push this repo to GitHub (a public repo, or a private one Community Cloud has access to).
+2. On [share.streamlit.io](https://share.streamlit.io), create a new app pointing at this repo,
+   branch `master`, main file `app.py`. Community Cloud reads `requirements.txt` and
+   `packages.txt` from the repo root automatically — no extra configuration needed for either.
+3. In the app's **Settings → Secrets** panel, paste `GROQ_API_KEY = "..."` (the same syntax as
+   `.streamlit/secrets.toml.example`) with a real key.
+4. Deploy. First boot will be slow — PaddleOCR downloads its detection/recognition model
+   weights on first use (§7's `paddleocr` row), not at install time, so the very first OCR call
+   on the live app pays that download cost once.
+
+### Known open risks — flagged, not solved
+
+- **PaddleOCR's resource ceiling on Community Cloud's free tier is unverified.** `paddlepaddle`
+  is the heaviest dependency in this project by a wide margin (§7) — a large native wheel plus,
+  on first use, a further model-weight download. Community Cloud's free tier has a real memory
+  ceiling (roughly ~1GB historically), and nothing in this checklist item deploys the app for
+  real to confirm PaddleOCR fits inside it. If it doesn't, the two options are upgrading to a
+  paid Community Cloud tier or making Tesseract the primary engine instead of the fallback for
+  cloud deployments specifically — **either is a real stack change and needs a report-back
+  before doing it**, per this checklist item's own instruction, not something to decide
+  unilaterally.
+- **The SQLite config DB is not persistent storage on Community Cloud.** Found while working
+  this checklist item, not previously documented: Community Cloud's container filesystem is
+  ephemeral — every redeploy or app restart gets a fresh filesystem, so `db/tender_mapper.db`
+  (§7's `DEFAULT_DB_PATH`) resets to freshly-seeded on every restart, silently discarding any
+  Config-tab edits a real user made away from the seeded schema. This project's spec never
+  called for cross-restart persistence beyond "SQLite for config persistence" (§2) in the
+  context of a single running session, so this isn't a regression against anything promised —
+  but it's a real operational gap a deployed user would hit, worth surfacing before this goes
+  in front of real users, not silently discovered later.
 
 ---
 
-## 8. Change Log
+## 9. Change Log
 
 | Date | Change | Approved by user? |
 |---|---|---|

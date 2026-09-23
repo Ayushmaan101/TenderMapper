@@ -6,12 +6,11 @@ purely session-scoped, touches no SQLite state. Checklist 4.1: the
 results table is live, backed by run/results.py. Checklist 4.3: the
 "Next Company" reset is live, backed by run/session_reset.py. Checklist
 4.4: the Excel export is live, backed by export/excel_export.py +
-run/export_ui.py. Checklist 5.1: the "Run Mapping" button
+run/export_ui.py. Checklist 5.1/3.3: the "Run Mapping" button
 (run/run_button.py) turns uploaded documents into a searchable OCR/text
-index (run/pipeline_runner.py) - a real slice of checklist 3.3, with
-robust per-document error isolation. Still deferred from 3.3: the actual
-per-column BM25-search + Groq-verify loop that would populate
-resolution_results automatically - see CHECKLIST.md phase 3.
+index and then auto-resolves every configured column against it
+(run/pipeline_runner.py), with per-document error isolation and
+per-column progress feedback.
 """
 import os
 
@@ -24,6 +23,7 @@ from ingest.ui import render_upload_section
 from run.export_ui import render_export_section
 from run.results import render_results_section
 from run.run_button import render_run_button
+from run.secrets_bootstrap import bootstrap_groq_api_key
 from run.session_reset import render_next_company_button
 from seed.seeder import seed_if_empty
 
@@ -32,6 +32,8 @@ st.set_page_config(
     page_icon="\U0001f4cb",
     layout="wide",
 )
+
+bootstrap_groq_api_key()
 
 
 @st.cache_resource
@@ -73,10 +75,9 @@ with run_tab:
     st.divider()
     st.subheader("Results")
     st.caption(
-        "Populated per-document by “Run Mapping” (OCR/text-layer resolution); the "
-        "per-column BM25-search + Groq-verify loop that would auto-fill these cells "
-        "(checklist 3.3) is still not wired in — correct any flagged or wrong cell "
-        "directly, edits persist for this session."
+        "Auto-populated by “Run Mapping” (OCR/text-layer resolution, then "
+        "per-column BM25-search + Groq-verify) — correct any flagged or wrong "
+        "cell directly, edits persist for this session."
     )
     render_results_section(conn)
     render_next_company_button()
