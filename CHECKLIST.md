@@ -344,12 +344,47 @@ Full regression suite (all 8 test files) passes clean.*
 
 ## Phase 3 — Retrieval & verification
 
-### [ ] 3.1 — BM25 index + synonym-aware search
+### [x] 3.1 — BM25 index + synonym-aware search
 Build a BM25 index over all extracted/OCR'd page text for the session. Own the tokenizer
 (`rank_bm25` has none). Query = requirement terms + stored synonyms, with `rapidfuzz` for term
 variants/OCR noise. Return **top 15–20 candidate pages** per schema row — wide, not top-5.
 **Verify:** a known requirement returns its known page inside the candidate pool; synonyms
 demonstrably change results vs. terms alone; pool size is 15–20, configurable.
+✅ *Done 2026-09-23 — **`search/tokenize.py`**: lowercase, split on non-alphanumeric runs,
+drop tokens < 2 chars, filter a deliberately conservative stopword list — explicitly verified
+`"who"` is never filtered (WHO-GMP is load-bearing domain vocabulary, and a generic stopword
+list would normally drop the pronoun "who").
+**`search/bm25_index.py`**: `CorpusIndex` (built once per session, reused across every schema
+column's query — not rebuilt per column) wraps `rank_bm25.BM25Okapi`, guarded against the
+library's `ZeroDivisionError` on an all-empty corpus. `search()` builds query tokens from
+requirement text + synonyms, fuzzy-expands them against the corpus vocabulary, scores via BM25,
+merges in `ocr.references.ReferenceIndex` hits (guaranteed a pool slot ahead of plain
+BM25-ranked non-reference pages, tiebroken by their own score), and returns `SearchCandidate`
+(`pdf_name, page_number, rank, score, snippet, matched_terms, match_signals`).
+**Fuzzy matching, corrected from the first draft**: uses `rapidfuzz.distance.Levenshtein`
+*absolute* edit distance, not a percentage ratio — a ratio cutoff badly under-serves short
+tokens (`who`→`wh0` is only ~67% similar by ratio, below a typical 75–80% cutoff, while the
+identical single-substitution `certificate`→`cert1ficate` scores ~91%; both are exactly one
+wrong character). The distance budget scales with token length (1 for <5 chars, 2 for longer)
+specifically to avoid the opposite risk: at distance ≤2, unrelated short acronyms like `gst`/
+`gmp` are edit-distance 2 apart and would otherwise cross-match. Also fixed during verification:
+the first draft skipped fuzzy expansion for any query token that had *some* exact vocabulary
+match, which silently missed a noisy OCR variant on a *different* page when a clean spelling
+existed elsewhere in the corpus — now every token is fuzzy-expanded regardless.
+**Verification — `tests/verify_bm25_search.py`, 38/38** against synthetic multi-page/multi-PDF
+corpora: exact matches rank top with a positive score; a synonym-only page (zero token overlap
+with the requirement's own wording, confirmed by direct set intersection) ranks #1 once the
+synonym is added and is unreachable without it; the checklist's own `wh0`/`cert1ficate` OCR-noise
+examples are captured via fuzzy expansion while still ranking below the clean exact match; the
+`gst`/`gmp` short-acronym collision is proven *not* to happen; a reference-only page bubbles into
+the pool, with a dedicated test isolating that effect from both "small corpus returns everything"
+and BM25's own IDF math (which can make a bare rare phrase score deceptively high on wording
+alone) — using a query that cites the same reference in a different surface form
+(`Sec. 8 Cl. 11` vs. the page's `Section VIII Clause 11`) so the two signals stay cleanly
+decoupled, with the exclusion cutoff discovered empirically at runtime rather than assumed; and
+pool-size limits hold across corpus sizes both smaller (returns everything) and much larger
+(caps exactly, including when reference hits alone would otherwise exceed the cap). Full
+regression suite (all 9 test files) passes clean.*
 
 ### [ ] 3.2 — Groq verification / rerank
 For each candidate page, send page text + requirement text to Groq (Llama 3.3 70B); get back
