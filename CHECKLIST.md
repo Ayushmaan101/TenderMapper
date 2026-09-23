@@ -302,11 +302,43 @@ the identical cached result object with zero additional OCR calls, contrasted di
 `(pdf_name, page_number)` (two scanned pages in one PDF produce two distinct entries, each hit
 independently on re-run). Full regression suite (all 7 test files) passes clean.*
 
-### [ ] 2.4 — Section/clause reference extraction
+### [x] 2.4 — Section/clause reference extraction
 During extraction/OCR, separately index "Section X, Clause Y" style references per page as a
 lightweight secondary lookup.
 **Verify:** a page whose only signal is "Section VIII Clause 13" is retrievable by that reference
 even though it contains none of the requirement's vocabulary.
+✅ *Done 2026-09-23 — **`ocr/references.py`**: `extract_references` (4 keyword-anchored regexes —
+section+clause combo, standalone section/performa, schedule, form), immutable
+`ExtractedReference` (`kind, canonical, raw_text`), plus `ReferenceIndex`/`build_index`/`lookup`
+for the reverse (canonical token → `(pdf_name, page_number)`) index. Every pattern requires its
+literal keyword (Section/Sec./Clause/Cl./Schedule/Form) at a word boundary — never a bare
+number/date heuristic — which is what keeps it from false-positiving on financial years, money,
+or durations. **Canonicalization**: section numbers may be Roman (`VIII`) or Arabic (`8`) — both
+normalize to the same Arabic token via a round-trip-validated Roman-numeral converter (rejects
+malformed sequences like `IIII` or `VX` rather than guessing a value), so `Section VIII Clause 11`
+and `Sec. 8 Cl. 11` resolve to the identical `section 8 clause 11` token; leading zeros stripped
+(`Form-045` → `form 45`). A section+clause match also emits its own bare `section N` entry, so a
+query for just "Section VIII" still finds a page only ever indexed via the full combo.
+**Verification — `tests/verify_references.py`, 68/68**, including:
+- **100% seed-schema coverage**: every one of the 23 real Table 1/Table 2 seed items checked
+  against a hand-derived expected canonical-reference set (12 items carry a reference, 11
+  correctly produce none) — not synthetic stand-ins, the actual `SEED_SCHEMA` strings.
+- **False positives**: an extensive suite built from real risky substrings already present in
+  the seed text itself — financial years, `Rs.10/-`/`Rs. 100/-` amounts, `"3-years"`/`45 days`/
+  `02 years` durations, `3rd Party Sale`, `25%`, `I.V fluids`, `"Tender Acceptance Form"` (Form
+  with no trailing number), and — the trickiest case — `"form"` embedded mid-word inside
+  `performance`/`format`/`information`, all three of which are literal substrings of the real
+  seed text. A dedicated test also confirms `Form-45` and the unrelated `45 days` (same digits,
+  different meaning) resolve correctly in opposite directions.
+- **Format-variant equivalence**: `Section VIII Clause 11` / `Section-VIII, Clause 11` /
+  `Sec. 8 Cl. 11` / mixed case all canonicalize identically; malformed Roman numerals rejected.
+- **The core point of this module**: a synthetic page whose entire text is the bare string
+  `"Section VIII Clause 11"` — zero requirement vocabulary — is correctly found via `lookup()`
+  when queried with the real Document 3 seed text; an unrelated page in the same index is not.
+  Also verified: bare-section queries find combo-indexed pages, a no-reference query returns an
+  empty list rather than erroring, repeated mentions on one page don't duplicate that page's
+  index entry, and distinct pages/PDFs are tracked independently.
+Full regression suite (all 8 test files) passes clean.*
 
 ---
 
