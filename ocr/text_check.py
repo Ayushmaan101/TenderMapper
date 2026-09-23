@@ -110,12 +110,38 @@ def check_page_text_layer(pdf_name: str, page: fitz.Page, page_number: int) -> P
     )
 
 
+class PdfProcessingError(Exception):
+    """Raised when a PDF's bytes cannot be processed at all - malformed/
+    corrupt structure (PyMuPDF's own open() raises, e.g. FileDataError),
+    or password-protected (opens fine, but PyMuPDF raises ValueError the
+    moment anything tries to actually read a page without the password).
+
+    Deliberately distinct from a PDF that opens fine but simply has zero
+    pages - that is not an error (see checklist 2.2's zero-page test);
+    this exception is only for bytes that genuinely cannot be read at
+    all. Callers (checklist 5.1's per-document orchestration) catch this
+    to isolate one bad document from its siblings, never checked
+    silently - every raise here is meant to become a visible warning.
+    """
+
+
 def check_pdf_text_layers(pdf_name: str, pdf_bytes: bytes) -> list[PageTextResult]:
     """Open pdf_bytes fully in memory (no temp files) and evaluate every
-    page. Empty-list result for a zero-page PDF; not a crash.
+    page. Empty-list result for a zero-page PDF; not a crash. Raises
+    PdfProcessingError - not a raw PyMuPDF exception - for corrupt or
+    password-protected bytes, so every caller has exactly one exception
+    type to catch regardless of which underlying failure mode occurred.
     """
-    results: list[PageTextResult] = []
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as exc:  # noqa: BLE001 - PyMuPDF's own exception types vary by failure mode and version
+        raise PdfProcessingError(f"'{pdf_name}' could not be opened - it may be corrupted: {exc}") from exc
+
+    with doc:
+        if doc.needs_pass:
+            raise PdfProcessingError(f"'{pdf_name}' is password-protected and cannot be processed.")
+
+        results: list[PageTextResult] = []
         for index, page in enumerate(doc):
             results.append(check_page_text_layer(pdf_name, page, page_number=index + 1))
     return results

@@ -436,6 +436,17 @@ Drive the whole pipeline for **every column in every configured table**, general
 configured shape. Progress reporting across the whole run.
 **Verify:** with a 3rd table added via the Config tab, the run resolves its columns too — nothing
 hardcodes 2 tables / 10 / 13.
+🔶 *Partially done as of checklist 5.1 (2026-09-23), at the user's explicit direction to give
+5.1 a real end-to-end flow to test error handling against.* `run/run_button.py` +
+`run/pipeline_runner.py` already do: the "▶️ Run Mapping" button, ingest → text-layer-check →
+OCR → building `corpus_index`/`page_texts`/`reference_index`, with per-document error isolation
+and progress reporting (page-level, via a callback). **Still to do here**: the actual per-column
+loop — for every configured column, BM25-search `corpus_index` with the column's requirement
+text + stored synonyms + `reference_index`, Groq-verify the candidate pool
+(`verify.groq_verifier.resolve_column`), and write each column's result into
+`st.session_state["resolution_results"]` — plus progress reporting across that column-by-column
+loop specifically (distinct from the page-level progress the OCR step already reports). Re-check
+CHECKLIST.md's verify line above once that part is built.
 
 ---
 
@@ -632,12 +643,68 @@ the real production DB.*
 
 ## Phase 5 — Hardening & deployment
 
-### [ ] 5.1 — Basic error handling
+### [x] 5.1 — Basic error handling
 Graceful handling for: corrupt/encrypted PDFs, zero-page PDFs, OCR failures on a single page,
 Groq API errors/timeouts/missing key, empty upload, and empty config. Errors surface in the UI
 and never take down an entire run.
 **Verify:** each failure mode produces a clear in-app message and the run continues for the
 remaining pages/columns.
+✅ *Done 2026-09-23 — **Note on scope**: checklist 3.3 (the full per-column BM25-search +
+Groq-verify loop) is still deferred, but per the user's explicit direction this item builds
+both the underlying pipeline guards *and* a real, tested slice of the end-to-end execution
+flow to verify them against — a new "▶️ Run Mapping" button (`run/run_button.py` +
+`run/pipeline_runner.py`) that turns ingested documents into a searchable OCR/text index
+(`corpus_index`/`page_texts`/`reference_index`), with per-document error isolation. This is
+genuine forward progress on 3.3, not throwaway scaffolding — 3.3 still needs to add the
+actual per-column BM25-search + Groq-verify loop on top of this.
+**Corrupt / encrypted / zero-page PDFs** — confirmed PyMuPDF's real behavior first (not
+assumed): `fitz.open()` raises `FileDataError` for corrupt bytes; for an encrypted PDF, `open()`
+itself succeeds but `doc.needs_pass` is truthy and iterating pages raises `ValueError` the
+moment anything tries to read one; a zero-page PDF opens fine with `page_count == 0` — a real,
+different case, not an error. `ocr/text_check.py` gained `PdfProcessingError` (raised for the
+first two, explicitly *not* the third) so `check_pdf_text_layers`/`resolve_pdf_text` (both
+`ocr/text_check.py` and `ocr/pipeline.py`) give every caller exactly one exception type to
+catch regardless of which underlying failure mode occurred, rather than a raw
+version-dependent PyMuPDF exception. `run/pipeline_runner.py` catches it **per document**, so
+one corrupt/encrypted sibling never aborts the rest of the batch.
+**Single-page OCR failures**: re-confirmed checklist 2.3's existing contract (both PaddleOCR
+and Tesseract failing on one page → `engine="failed"`, empty text, sibling pages unaffected)
+specifically with a multi-page document under this checklist's own test umbrella — no code
+change needed here, it already worked.
+**Groq errors** (`config/synonyms.py`, `verify/groq_verifier.py`): re-confirmed the existing
+resilience contracts from checklists 1.4/3.2 (missing key, simulated network drop) — again no
+code change needed, already handled; re-tested here as dedicated 5.1 verification.
+**Empty upload / empty config**: `run/run_button.py` checks both explicitly before doing
+anything else — `st.warning` and an early return, never an `IndexError`/`AttributeError`.
+Empty config was already separately handled by `run/results.py` (checklist 4.1); the new
+button adds its own guard on the same condition, checked independently.
+**A real, useful process discovery**: this checklist's UI test needed **multiple `AppTest`
+instances within one Python process** for the first time in this project (every prior UI
+suite created exactly one). That exposed that `app.py`'s DB connection — cached via
+`st.cache_resource`, correct and intentional for real production use — is silently **shared
+across every `AppTest` instance in the same process regardless of the `TENDER_MAPPER_DB_PATH`
+env var**, since the cache doesn't vary by any argument. One scenario deliberately emptying
+its config would otherwise have corrupted every later scenario's state. Fixed with
+`st.cache_resource.clear()` before each scenario, alongside a distinct temp DB file — now
+documented in the test itself for future multi-instance AppTest suites in this project.
+**Verification — two suites, orchestrated by `tests/verify_error_handling.py`, both
+passing**: `verify_error_handling_unit.py` (34/34, no Streamlit) — `PdfProcessingError` raised
+correctly for corrupt/encrypted bytes and NOT raised for zero-page, at both the
+`text_check`/`pipeline` layer; `run/pipeline_runner.py` isolating 2 genuinely bad documents
+(corrupt + encrypted) from 3 good ones (2 valid + 1 zero-page, correctly not flagged as bad)
+in one 5-document batch, with the search index containing only the valid pages; empty and
+all-bad document lists handled cleanly; single-page OCR failure isolated within a 3-page
+document; Groq missing-key and simulated-network-drop fallback for both call sites.
+`verify_error_handling_ui.py` (24/24, `AppTest`, through the real "Run Mapping" button) — a
+corrupted PDF alongside a valid one (valid one processes, corrupt one gets a named warning,
+search index has only the valid page, **and the app stays interactive for a further click
+afterward**); a password-protected PDF alongside a valid one; a zero-page PDF producing no
+warning at all; an empty-upload click; an empty-config click (plus the Results section's own
+independent empty-config message); and a simulated Groq drop/missing key through both real
+UI-triggered Groq call sites that exist today (config-time synonym expansion, checklist 4.2's
+manual re-search) — the app remains fully interactive afterward, confirmed by a further
+successful interaction. Full regression suite (all 15 test files) passes clean; also confirmed
+against the real production DB.*
 
 ### [ ] 5.2 — Streamlit Community Cloud deployment config
 `packages.txt` (Tesseract via apt), `requirements.txt` pinned for Linux, `.streamlit/config.toml`,

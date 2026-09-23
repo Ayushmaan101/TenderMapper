@@ -132,6 +132,13 @@ files. Session-scoped.
 already has a usable text layer, use it and **skip OCR for that page**. OCR is expensive;
 only pay for it where it's needed. Some PDFs in a scanned folder do have a real text layer.
 
+**Error handling (checklist 5.1):** a PDF PyMuPDF cannot open at all (corrupt bytes) or cannot
+read without a password (`doc.needs_pass`) raises `ocr.text_check.PdfProcessingError` — one
+exception type regardless of which underlying PyMuPDF failure mode occurred. A zero-page PDF
+is explicitly *not* an error (opens fine, `page_count == 0`) and returns an empty result
+instead. `run/pipeline_runner.py` (checklist 5.1, a real slice of step 3's future orchestration
+below) catches `PdfProcessingError` **per document**, so one bad sibling never aborts a batch.
+
 **3. OCR.** Pages that failed the pre-check get OCR'd. PaddleOCR is primary. Tesseract is
 the fallback.
 
@@ -317,6 +324,14 @@ Distinct from the Config tab.
    pipeline (text-layer check → OCR if needed → BM25 + synonym search → Groq verification) to
    resolve `{pdf_name, page_number_or_range, confidence}` for that column, using the column's
    stored requirement text + synonyms.
+
+   **Status:** a "▶️ Run Mapping" button (checklist 5.1, `run/run_button.py` +
+   `run/pipeline_runner.py`) does the ingest → text-layer-check → OCR → search-index portion of
+   this today, with per-document error isolation, and populates `corpus_index`/`page_texts`/
+   `reference_index`. **Still missing** (checklist 3.3): the actual per-column loop — for every
+   configured column, BM25-search that index + Groq-verify the candidates — that would populate
+   `resolution_results` automatically. Until 3.3 lands, every column starts flagged/unresolved
+   and only checklist 4.2's manual re-search or direct grid edits populate it.
 4. **Render.** Once all columns across all tables are resolved, render the results as an
    **editable table per configured table** (`st.data_editor`). Layout must hold up regardless of
    how many tables/columns/rows are configured.
@@ -439,3 +454,4 @@ called out as a real risk against the deployment checklist item, not a solved pr
 | 2026-09-23 | Checklist 4.2: `CONFIDENCE_THRESHOLD = 0.70` (§3 step 8). Added the "Status" column (⚠️ Flagged / ✅ Resolved) to every results grid, changing its shape from `(N, 6)` to `(N, 7)` — checklist 4.1's own test suite needed updating for this, expected and done in the same commit. Defined the `corpus_index`/`page_texts`/`reference_index` session-state contract (§3 step 9) that checklist 3.3 is expected to populate; manual re-search reads it directly and shows a graceful placeholder message when absent, same posture as 4.1's own placeholder handling. `_run_manual_research` takes no `db.crud` import and no `sqlite3.Connection` at all, so it can't write to the config DB even by accident — verified with a full DB fingerprint, byte-identical before/after. | Yes — checklist 4.2 |
 | 2026-09-23 | Checklist 4.3: new `run/session_reset.py` (§5 step 5 updated with the implementation approach). Completed the session-state contract started in 4.2 — `run/results.py` gains `OCR_CACHE_KEY` alongside `corpus_index`/`page_texts`/`reference_index`, plus `reset_run_state()` clearing all four. `ingest/ui.py`'s file uploader is now keyed dynamically (`company_file_uploader_{generation}`) so it can be genuinely cleared (Streamlit has no direct "clear" API for `st.file_uploader`) — a real regression this caused in checklist 2.1's own test (which hardcoded the old fixed key) was found and fixed in the same commit. | Yes — checklist 4.3 |
 | 2026-09-23 | Checklist 4.4: new `export/excel_export.py` (§5 step 10 updated with the export shape) + `run/export_ui.py`. Moved `CONFIDENCE_THRESHOLD`/`is_flagged` from `run/results.py` into `verify/groq_verifier.py` (alongside `VerificationResult`) before writing the export module — the first draft needed them from `run/results.py`, an inverted dependency for a UI-layer package; `run/results.py` re-exports both, unchanged behavior for existing importers. **Real bug found and fixed** (via this checklist's own export test): the results grid's edit-writeback (checklist 4.1) never set `success=True` on a manually corrected cell, so raising a row's confidence by hand left it stuck showing "Flagged" — fixed by flipping `success` only when an edited value genuinely differs from what's stored, not on every incidental rerender. Confirmed no regression against 4.1/4.2's own suites. | Yes — checklist 4.4 |
+| 2026-09-23 | Checklist 5.1: per user's explicit direction, builds both the underlying pipeline error guards and a real, tested slice of checklist 3.3's end-to-end flow to verify them against — new "▶️ Run Mapping" button (`run/run_button.py` + `run/pipeline_runner.py`), which is genuine forward progress on 3.3 (ingest → text-check → OCR → search-index build), not throwaway scaffolding; 3.3 still needs the per-column BM25-search + Groq-verify loop on top of it (§5 step 3 updated with current status). `ocr/text_check.py` gained `PdfProcessingError`, raised for corrupt PDF bytes (`fitz.open()` itself raises) and password-protected PDFs (`doc.needs_pass`), explicitly *not* raised for a zero-page PDF (opens fine, not an error) — confirmed all three behaviors empirically against real PyMuPDF before writing the guards, not assumed. **Process discovery worth flagging for future test-writing**: this checklist's UI test was the first in this project to create multiple `AppTest` instances within one Python process; that exposed that `app.py`'s `st.cache_resource`-cached DB connection is silently shared across every `AppTest` instance in the same process regardless of the `TENDER_MAPPER_DB_PATH` env var (correct production behavior, surprising in a multi-instance test) — fixed with `st.cache_resource.clear()` before each scenario, now documented in the test itself. | Yes — user-directed scope (3.3 slice) + checklist 5.1 |

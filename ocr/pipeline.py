@@ -44,7 +44,7 @@ from typing import Callable, MutableMapping, Optional
 import pymupdf as fitz
 from PIL import Image
 
-from ocr.text_check import check_pdf_text_layers
+from ocr.text_check import PdfProcessingError, check_pdf_text_layers
 
 DEFAULT_DPI = 200  # PyMuPDF's baseline is 72 dpi; zoom = dpi / 72.0.
 # 200 dpi is the well-known OCR sweet spot: comfortably legible for
@@ -167,12 +167,24 @@ def resolve_pdf_text(
     engine invoked at all), OCR the rest, and pass a genuinely
     blank/uncertain page through as engine="native" too (empty text -
     nothing to gain from OCR without an image, per ocr/text_check.py).
+
+    Raises PdfProcessingError for corrupt/password-protected bytes
+    (checklist 5.1) - propagated from check_pdf_text_layers() below, so
+    the caller only ever has one exception type to catch regardless of
+    which stage detects the problem. Callers processing multiple
+    documents (checklist 5.1's per-document orchestration) must catch
+    this per document so one bad PDF never aborts its siblings.
     """
-    pre_checks = check_pdf_text_layers(pdf_name, pdf_bytes)
+    pre_checks = check_pdf_text_layers(pdf_name, pdf_bytes)  # raises PdfProcessingError, uncaught here on purpose
     results: list[OcrPageResult] = []
     total = len(pre_checks)
 
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+    try:
+        doc_cm = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as exc:  # noqa: BLE001 - defense-in-depth; check_pdf_text_layers already opened these same bytes once
+        raise PdfProcessingError(f"'{pdf_name}' could not be re-opened for OCR: {exc}") from exc
+
+    with doc_cm as doc:
         for i, pre in enumerate(pre_checks):
             page_number = pre.page_number
             cache_key = (pdf_name, page_number)

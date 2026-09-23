@@ -6,9 +6,12 @@ purely session-scoped, touches no SQLite state. Checklist 4.1: the
 results table is live, backed by run/results.py. Checklist 4.3: the
 "Next Company" reset is live, backed by run/session_reset.py. Checklist
 4.4: the Excel export is live, backed by export/excel_export.py +
-run/export_ui.py. The actual per-column resolution loop (checklist 3.3 -
-running search+verify for every configured column) is still a
-placeholder — see CHECKLIST.md phase 3.
+run/export_ui.py. Checklist 5.1: the "Run Mapping" button
+(run/run_button.py) turns uploaded documents into a searchable OCR/text
+index (run/pipeline_runner.py) - a real slice of checklist 3.3, with
+robust per-document error isolation. Still deferred from 3.3: the actual
+per-column BM25-search + Groq-verify loop that would populate
+resolution_results automatically - see CHECKLIST.md phase 3.
 """
 import os
 
@@ -20,6 +23,7 @@ from db.schema import init_db
 from ingest.ui import render_upload_section
 from run.export_ui import render_export_section
 from run.results import render_results_section
+from run.run_button import render_run_button
 from run.session_reset import render_next_company_button
 from seed.seeder import seed_if_empty
 
@@ -65,19 +69,18 @@ with run_tab:
     st.text_input("Company name", key="company_name")
     render_upload_section()
     st.divider()
+    render_run_button(conn)
+    st.divider()
     st.subheader("Results")
     st.caption(
-        "Resolved automatically once the per-column resolution loop (checklist 3.3) "
-        "is wired in; editable here regardless. Correct any flagged or wrong cell "
-        "directly — edits persist for this session."
+        "Populated per-document by “Run Mapping” (OCR/text-layer resolution); the "
+        "per-column BM25-search + Groq-verify loop that would auto-fill these cells "
+        "(checklist 3.3) is still not wired in — correct any flagged or wrong cell "
+        "directly, edits persist for this session."
     )
     render_results_section(conn)
     render_next_company_button()
     render_export_section(conn)
-    st.info(
-        "Placeholder — the per-column resolution loop is not built yet. "
-        "See CHECKLIST.md phase 3."
-    )
 
 with config_tab:
     st.header("Config")
