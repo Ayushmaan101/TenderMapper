@@ -487,12 +487,48 @@ renders *no* `data_editor` at all — my first draft's expected dataframe count 
 module's behavior. Full regression suite (all 11 test files) passes clean; also confirmed
 against the real production DB (still holding the untouched seeded 10/13-row schema).*
 
-### [ ] 4.2 — Confidence flagging + manual re-search
+### [x] 4.2 — Confidence flagging + manual re-search
 Flag any row without a clean high-confidence match as flagged/incomplete — never silently blank,
 never silently wrong. Flagged rows get a **"search again with custom terms"** box that re-runs
 BM25 with the reviewer's terms, without touching the Config panel.
 **Verify:** a low-confidence row renders visibly flagged; a no-match row renders flagged, not
 blank; custom-term re-search updates just that row and leaves stored config synonyms unchanged.
+✅ *Done 2026-09-23 — **Flagging**: `CONFIDENCE_THRESHOLD = 0.70`; `is_flagged(result)` = `(not
+result.success) or confidence < 0.70` — deliberately not a plain confidence check, so a never-run
+column (the 4.1 blank placeholder, `success=False`) and a Groq call that outright failed both
+flag identically to a real low-confidence match, never silently blank. **Surfaced** via a
+read-only "Status" column (⚠️ Flagged / ✅ Resolved) prepended to each table's grid, a per-table
+`st.warning`/`st.success` summary, and an overall 3-metric summary (Total / Resolved / Flagged)
+across all tables at the top of the Results section.
+**Manual re-search**: one expander per flagged column ("🔍 {column name}") with a text input +
+"Search again" button. Defines the session-state contract checklist 3.3 will populate —
+`corpus_index` (a `search.bm25_index.CorpusIndex`), `page_texts`, `reference_index` — with a
+graceful "no documents processed yet" message when they're absent, same placeholder posture as
+4.1. The reviewer's custom terms drive BM25 **retrieval only** (no stored synonyms mixed in —
+the reviewer is overriding the search per PROJECT_HARNESS.md §5: "type the exact term they see");
+Groq **verification** still judges the result against the column's real, unmodified
+`requirement_text` — custom terms help find the page, they don't redefine what "satisfies the
+requirement" means. As in checklist 3.2, the resolved `pdf_name`/`page_number_or_range` are taken
+from the real candidate, never the model's JSON echo.
+**Strict isolation**: `_run_manual_research` takes no `db.crud` import and no `sqlite3.Connection`
+— it can't write to the config DB even by accident, not just by convention. Verified directly
+with a full table/column/synonym DB fingerprint, byte-identical before and after a manual
+re-search.
+**Verification — two suites, orchestrated by `tests/verify_flagging_and_research.py`, both
+passing**: `verify_confidence_flagging_unit.py` (10/10, no Streamlit) — the blank placeholder and
+a `success=False` result both flag regardless of confidence; the exact threshold boundary (0.69
+flagged, 0.70 and 0.71 not). `verify_manual_research_ui.py` (27/27, `AppTest`) — fresh seeded
+schema shows 23/23 flagged with 23 matching re-search expanders; injecting one high- and one
+low-confidence result updates the summary metrics and per-row Status correctly, and the
+now-resolved column's expander disappears while the still-flagged one's stays; a re-search
+attempted with no corpus index yet is handled gracefully; a real re-search (mocked Groq,
+deliberately returning a hallucinated `pdf_name`/page to prove it's ignored) updates only the
+target column — **every other column's result, including two pre-existing ones, is proven
+byte-unchanged** — flips that row's Status from Flagged to Resolved and removes its expander;
+the **DB fingerprint is byte-identical before and after**; empty/whitespace-only custom terms
+show a warning and never invoke a search at all. Full regression suite (all 12 test files,
+including checklist 4.1's own suite updated for the new "Status" column) passes clean; also
+confirmed against the real production DB.*
 
 ### [ ] 4.3 — Session reset ("Next Company")
 Build session-state management explicitly around the company-in → resolve → review →

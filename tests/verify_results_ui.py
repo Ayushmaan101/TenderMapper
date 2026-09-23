@@ -37,7 +37,7 @@ def check(label: str, condition: bool) -> None:
     print(f"{'OK  ' if condition else 'FAIL'} {label}")
 
 
-EXPECTED_RESULT_COLUMNS = ["Column", "Requirement", "PDF Name", "Page Number / Range", "Confidence", "Match Snippet"]
+EXPECTED_RESULT_COLUMNS = ["Status", "Column", "Requirement", "PDF Name", "Page Number / Range", "Confidence", "Match Snippet"]  # "Status" added by checklist 4.2's confidence flagging
 
 
 def main() -> None:
@@ -57,7 +57,7 @@ def main() -> None:
         dataframes = list(at.dataframe)
         check("seeded schema -> exactly 2 results grids rendered (Table 1, Table 2)", len(dataframes) == 2)
         shapes = sorted(df.value.shape for df in dataframes)
-        check("seeded schema -> grid row counts are exactly 10 and 13 (Table 1 / Table 2)", shapes == [(10, 6), (13, 6)])
+        check("seeded schema -> grid row counts are exactly 10 and 13 (Table 1 / Table 2)", shapes == [(10, 7), (13, 7)])
         check(
             "each grid has exactly the 6 expected resolved-field + label columns",
             all(list(df.value.columns) == EXPECTED_RESULT_COLUMNS for df in dataframes),

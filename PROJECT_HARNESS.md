@@ -157,10 +157,29 @@ not just scoring.
 **8. Confidence flagging.** Any row without a clean high-confidence match renders as
 flagged/incomplete for human review. Never silently blank. Never silently wrong.
 
+**Threshold (decided in checklist 4.2): `CONFIDENCE_THRESHOLD = 0.70`.** A row is flagged when
+verification never succeeded (covers both "never resolved yet" and "the Groq call itself
+failed") **or** its confidence is below 0.70 — not a plain confidence check, so a column that's
+simply never been run flags identically to one Groq genuinely scored low, rather than looking
+falsely clean by default.
+
 **9. Manual override.** Flagged rows get a **"search again with custom terms"** box in the
 UI, so a human reviewer can type the exact term they can see in the document and re-run
 BM25 — **without touching the Config panel**. This is a run-tab affordance, not a config
 edit.
+
+The reviewer's custom terms drive BM25 **retrieval only** (no stored synonyms mixed in — this
+is the reviewer overriding the search). Groq **verification** still judges the result against
+the column's real, unmodified `requirement_text` — custom terms help find the candidate page,
+they never redefine what "satisfies the requirement" means.
+
+**Session-state contract for the search index (checklist 4.2, to be populated by checklist
+3.3):** `st.session_state["corpus_index"]` (a `search.bm25_index.CorpusIndex`),
+`st.session_state["page_texts"]` (`dict[(pdf_name, page_number), str]`), and
+`st.session_state["reference_index"]` (an `ocr.references.ReferenceIndex`, optional). Checklist
+3.3's per-column resolution loop is expected to build and store these once, at the start of a
+company's run, for both the automatic resolution loop and manual re-search to share — not
+rebuilt per column and not rebuilt per manual re-search click.
 
 **10. Results + export.** Editable table per configured table (`st.data_editor`), exported
 to Excel via `openpyxl` matching the configured schema.
@@ -401,3 +420,4 @@ called out as a real risk against the deployment checklist item, not a solved pr
 | 2026-09-21 | Checklist 2.3: built `ocr/pipeline.py` (rasterize via PyMuPDF at 200 dpi, PaddleOCR primary, Tesseract fallback, per-page cache, progress callback). Found and fixed two real environment issues, both now documented in §7's `paddleocr` row: (1) `PaddleOCR.predict()` crashes on every call with oneDNN enabled on this machine — fixed with `enable_mkldnn=False`, required, not optional; (2) the `use_doc_orientation_classify`/`use_doc_unwarping` preprocessing steps (meant for photographed/warped documents) were observed to zero out detection entirely on a clean synthetic test page — disabled by default as a judgment call given this project's actual input is office-scanned PDFs, not phone photos; `use_textline_orientation=True` (the user's spec) kept on. `Pillow` and `numpy` added to `requirements.txt` as explicit direct dependencies (were already installed transitively via `paddlepaddle`; `ocr/pipeline.py` now imports both directly). | Yes — checklist 2.3 |
 | 2026-09-23 | Checklist 3.2: confirmed `openai/gpt-oss-120b` (same substitution as checklist 1.4, kept consistent across both Groq call sites per explicit approval) for `verify/groq_verifier.py`'s verification/rerank step. §2 table updated to drop the "unconfirmed" flag left on this row after 1.4. Live-tested the actual discrimination the prompt exists for: a genuine WHO-GMP certificate scored 0.95 confidence, a page that only mentions WHO-GMP in passing (pointing to "Annexure B" without providing the certificate) scored 0.0 — both against real requirement text from the seed schema, not synthetic stand-ins. | Yes — checklist 3.2 |
 | 2026-09-23 | Checklist 4.1: built at the user's explicit direction ahead of checklist 3.3 (the per-column resolution loop) — the results UI reads/edits `st.session_state["resolution_results"]`, which 3.3 will populate later; unresolved columns render as blank placeholders identically to a real result. New `run/` package (`run/results.py`), mirroring the `config/`/`ingest/` pattern. **Row-orientation decision** (§5 step 4 updated with the reasoning): one results-grid row per `schema_column`, not per the source document's own layout — the only representation that stays correct for an arbitrary, freely reconfigured schema without per-table hardcoding. Reuses checklist 3.2's `VerificationResult` directly as the results-store value type rather than inventing a parallel data model. | Yes — user-directed build order + checklist 4.1 |
+| 2026-09-23 | Checklist 4.2: `CONFIDENCE_THRESHOLD = 0.70` (§3 step 8). Added the "Status" column (⚠️ Flagged / ✅ Resolved) to every results grid, changing its shape from `(N, 6)` to `(N, 7)` — checklist 4.1's own test suite needed updating for this, expected and done in the same commit. Defined the `corpus_index`/`page_texts`/`reference_index` session-state contract (§3 step 9) that checklist 3.3 is expected to populate; manual re-search reads it directly and shows a graceful placeholder message when absent, same posture as 4.1's own placeholder handling. `_run_manual_research` takes no `db.crud` import and no `sqlite3.Connection` at all, so it can't write to the config DB even by accident — verified with a full DB fingerprint, byte-identical before/after. | Yes — checklist 4.2 |
