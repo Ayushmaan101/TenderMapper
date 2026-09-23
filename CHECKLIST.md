@@ -573,10 +573,60 @@ One real regression surfaced and fixed: checklist 2.1's own upload test hardcode
 dynamic) uploader key — updated to the generation-0 key in the same commit. Full regression suite
 (all 13 test files) passes clean; also confirmed against the real production DB.*
 
-### [ ] 4.4 — Excel export (openpyxl)
+### [x] 4.4 — Excel export (openpyxl)
 Export the (possibly reviewer-edited) results to Excel matching the configured schema.
 **Verify:** exported workbook opens cleanly; sheet/table structure matches the current config,
 not the seeded default; reviewer edits from `st.data_editor` appear in the export.
+✅ *Done 2026-09-23 — **`export/excel_export.py`** (pure openpyxl, deliberately no Streamlit
+import — matching the established split throughout this codebase, and what makes the workbook
+directly unit-testable): one worksheet per `schema_table`, one data row per `schema_column`
+(the same row orientation `run/results.py` settled on in 4.1). Exported columns exactly as
+specified — `Status, Requirement, PDF Name, Page Number / Range, Confidence, Match Snippet`
+— deliberately omitting the short internal "Column" label the Run tab's grid also shows; the
+full requirement text is what a reader outside this app needs. **Formatting**: bold headers,
+frozen header row, per-column widths, `wrap_text` on Requirement/Match Snippet, `0.00`
+number format on Confidence. **Sheet-name sanitization**: ≤31 chars, Excel-prohibited
+characters (`\ / ? * [ ] :`) replaced, blank-after-cleaning falls back to `"Sheet"`, and —
+not explicitly asked for but necessary for correctness — **case-insensitive de-duplication**
+(Excel treats "Table A" and "TABLE A" as the same sheet name) via a numeric suffix that still
+respects the 31-char limit. **Refactor along the way**: `CONFIDENCE_THRESHOLD`/`is_flagged`
+moved from `run/results.py` into `verify/groq_verifier.py` (alongside `VerificationResult`
+itself) before `export/excel_export.py` was written — the first draft needed them from
+`run/results.py`, an inverted dependency for a UI-layer package; `run/results.py` now
+re-exports both for existing importers, unchanged behavior.
+**Real bug found and fixed** (via this checklist's own export test, not 4.1/4.2's): the
+results grid's edit-writeback (checklist 4.1) never set `success=True` on a manually corrected
+cell, so a reviewer raising a row's confidence to 0.95 by hand kept `success=False` from its
+original blank placeholder and stayed stuck showing "Flagged" — exactly the inconsistency
+`is_flagged()` exists to prevent. Fixed by flipping `success` to `True` only when an edited
+value genuinely differs from what's stored (not on every incidental rerender, which would have
+made `success` meaningless as a signal). Verified this doesn't regress 4.1/4.2's own test
+suites (full regression re-run clean).
+**UI — new `run/export_ui.py`**: a thin `st.download_button` wrapper, placed after the
+"Next Company" button per the checklist's literal instruction, with a caption calling out
+that export should happen *before* clicking Next Company (which wipes the very state being
+exported). Filename: sanitized company name + `.xlsx`, falling back to
+`tender_compliance_mapping.xlsx` for a blank/all-invalid name.
+**Verification — two suites, orchestrated by `tests/verify_excel_export.py`, both passing**:
+`verify_excel_export_unit.py` (52/52, no Streamlit) — sheet/filename sanitization including a
+genuine case-insensitive collision disambiguated within the length limit; the **seeded schema
+producing exactly 2 sheets** ("Table 1": 11 rows, "Table 2": 14 rows including headers) with
+every Requirement cell checked **verbatim** against the real seed text, in order; a hand-built
+edit landing exactly in the right cell without touching any other row; a **reconfigured schema
+with custom names, special characters, and a genuine sheet-name collision** producing a valid
+file; and empty-results/zero-table/zero-column edge cases. Every workbook built in the suite is
+round-tripped through `openpyxl.load_workbook()` on its exported bytes — the direct proof of
+"produces valid, openable Excel files."
+`verify_excel_export_ui.py` (14/14, `AppTest`) — since `AppTest`'s download-button element
+exposes only whether it was clicked, not the file bytes (Streamlit stores the payload via an
+internal deferred-file mechanism), this suite verifies UI *wiring* via `AppTest` and verifies
+*content* by calling `export_to_bytes()` directly against the exact same session state a real
+click would use: a real edit driven through the actual `st.data_editor` (same simulation
+technique as 4.1/4.2) lands correctly in the exported bytes and flips that row's exported
+Status to "Resolved"; company-name-to-filename mapping; and a table added through the real
+Config tab with special characters in its name exports correctly with zero hardcoded
+assumptions. Full regression suite (all 14 test files) passes clean; also confirmed against
+the real production DB.*
 
 ---
 

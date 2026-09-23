@@ -98,15 +98,18 @@ from db import crud
 from db.models import SchemaColumn
 from ocr.references import ReferenceIndex
 from search.bm25_index import DEFAULT_POOL_SIZE, CorpusIndex, search as bm25_search
-from verify.groq_verifier import VerificationResult, resolve_column
+from verify.groq_verifier import (  # noqa: F401 - CONFIDENCE_THRESHOLD/is_flagged re-exported for existing importers
+    CONFIDENCE_THRESHOLD,
+    VerificationResult,
+    is_flagged,
+    resolve_column,
+)
 
 RESULTS_KEY = "resolution_results"  # st.session_state[RESULTS_KEY]: dict[int, VerificationResult], keyed by schema_column.id
 CORPUS_INDEX_KEY = "corpus_index"  # st.session_state[CORPUS_INDEX_KEY]: search.bm25_index.CorpusIndex | None
 PAGE_TEXTS_KEY = "page_texts"  # st.session_state[PAGE_TEXTS_KEY]: dict[(pdf_name, page_number), str]
 REFERENCE_INDEX_KEY = "reference_index"  # st.session_state[REFERENCE_INDEX_KEY]: ocr.references.ReferenceIndex | None
 OCR_CACHE_KEY = "ocr_cache"  # st.session_state[OCR_CACHE_KEY]: dict[(pdf_name, page_number), OcrPageResult]
-
-CONFIDENCE_THRESHOLD = 0.70
 
 _BLANK_RESULT = VerificationResult(
     pdf_name="", page_number_or_range="", confidence=0.0, match_snippet="",
@@ -126,15 +129,6 @@ def reset_run_state() -> None:
     st.session_state[PAGE_TEXTS_KEY] = {}
     st.session_state[REFERENCE_INDEX_KEY] = None
     st.session_state[OCR_CACHE_KEY] = {}
-
-
-def is_flagged(result: VerificationResult) -> bool:
-    """True if this row needs human review: verification never
-    succeeded (covers both "never resolved yet" and "the Groq call
-    itself failed"), or it succeeded but scored below
-    CONFIDENCE_THRESHOLD.
-    """
-    return (not result.success) or result.confidence < CONFIDENCE_THRESHOLD
 
 
 def render_results_section(conn: sqlite3.Connection) -> None:
@@ -200,12 +194,36 @@ def render_results_section(conn: sqlite3.Connection) -> None:
         for col in columns:
             edited_row = edited_df.loc[col.id]
             existing = results_store.get(col.id, _BLANK_RESULT)
+            new_pdf_name = str(edited_row["PDF Name"] or "")
+            new_page = str(edited_row["Page Number / Range"] or "")
+            new_confidence = float(edited_row["Confidence"] or 0.0)
+            new_snippet = str(edited_row["Match Snippet"] or "")
+
+            # This read-back-and-write-back runs on EVERY rerun (checklist
+            # 4.1's persistence design), not just when this specific row
+            # was touched - so `success` only flips to True when a value
+            # genuinely changed from what was already stored, not merely
+            # because the row round-tripped through an unrelated rerun.
+            # Without this, a row a reviewer corrected (e.g. confidence
+            # 0.0 -> 0.95) would keep success=False from its original
+            # blank placeholder and stay stuck showing "Flagged" despite
+            # the now-high confidence - caught by checklist 4.4's export
+            # test, which is exactly the kind of inconsistency
+            # is_flagged() exists to prevent.
+            changed = (
+                new_pdf_name != existing.pdf_name
+                or new_page != existing.page_number_or_range
+                or new_confidence != existing.confidence
+                or new_snippet != existing.match_snippet
+            )
+
             results_store[col.id] = replace(
                 existing,
-                pdf_name=str(edited_row["PDF Name"] or ""),
-                page_number_or_range=str(edited_row["Page Number / Range"] or ""),
-                confidence=float(edited_row["Confidence"] or 0.0),
-                match_snippet=str(edited_row["Match Snippet"] or ""),
+                pdf_name=new_pdf_name,
+                page_number_or_range=new_page,
+                confidence=new_confidence,
+                match_snippet=new_snippet,
+                success=True if changed else existing.success,
             )
 
         _render_manual_research(table, columns, results_store)

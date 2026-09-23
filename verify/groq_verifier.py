@@ -111,6 +111,24 @@ class VerificationResult:
     error: Optional[str] = None
 
 
+# Confidence flagging (checklist 4.2) lives here, alongside VerificationResult
+# itself, rather than in run/results.py (a UI-layer package) - both
+# run/results.py and export/excel_export.py need this rule and neither
+# should depend on the other; verify/ is the natural shared, lower-level
+# home for anything about interpreting a VerificationResult.
+CONFIDENCE_THRESHOLD = 0.70
+
+
+def is_flagged(result: VerificationResult) -> bool:
+    """True if this result needs human review: verification never
+    succeeded (covers both "never resolved yet" and "the Groq call
+    itself failed"), or it succeeded but scored below
+    CONFIDENCE_THRESHOLD. Never silently blank, never silently wrong -
+    PROJECT_HARNESS.md §2's stated safety net.
+    """
+    return (not result.success) or result.confidence < CONFIDENCE_THRESHOLD
+
+
 def _describe_groq_error(exc: Exception) -> str:
     from groq import (
         APIConnectionError,
