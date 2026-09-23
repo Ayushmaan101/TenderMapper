@@ -441,11 +441,51 @@ hardcodes 2 tables / 10 / 13.
 
 ## Phase 4 — Review UI & output
 
-### [ ] 4.1 — Results table UI (`st.data_editor`)
+### [x] 4.1 — Results table UI (`st.data_editor`)
 One editable table per configured table, columns matching the config. Layout holds up for any
 table/column/row count.
 **Verify:** renders correctly for the seeded 10-column and 13-row tables **and** for an edited
 config with different counts; cell edits persist in session state.
+✅ *Done 2026-09-23 — **New `run/` package** (mirroring the `config/`, `ingest/` pattern):
+`run/results.py`. **Row-orientation decision** (worth flagging explicitly): the results grid
+renders one ROW per schema_column, not per the original tender document's own visual layout
+(Table 1's 10 items read as ten columns-in-one-row in the real document; Table 2's 13 read as
+thirteen rows). Mimicking either original layout would require per-table hardcoding — exactly
+what this checklist forbids. Since config storage is uniform (N schema_columns per table, each
+one resolvable requirement) regardless of the source document's layout, one grid row per
+schema_column is the only representation that stays correct for an arbitrary, freely
+reconfigured schema — this is how "gracefully render any arbitrary number of ... columns"
+resolves into a concrete, dynamically-sized design.
+**Columns**: `Column` (name, read-only) and `Requirement` (full text, read-only, for reviewer
+context — a small addition beyond the checklist's literal 4-field list, justified since a
+reviewer needs to see the requirement to judge whether a resolved match is correct) are
+disabled; `PDF Name`, `Page Number / Range`, `Confidence` (numeric, clamped 0–1), `Match
+Snippet` are editable. Edits are read back out of `st.data_editor`'s return value and written
+explicitly into `st.session_state["resolution_results"]: dict[int, VerificationResult]` —
+reusing checklist 3.2's `VerificationResult` type directly rather than inventing a parallel
+data model, so checklist 3.3's resolution loop can populate the exact same structure this UI
+already reads.
+**Note on build order**: checklist 3.3 (the actual per-column resolution loop) hasn't been
+built yet — per the user's explicit instruction to proceed straight to 4.1. The results UI
+reads/edits whatever's in `st.session_state["resolution_results"]`; until 3.3 wires in real
+search+verify calls, unresolved columns just show blank placeholder values, rendered identically
+to a real (but empty) result — there is nothing 4.1-specific about "not yet resolved."
+**Verification — `tests/verify_results_ui.py`, 18/18 (AppTest)**: `st.data_editor` has no
+dedicated AppTest interaction helper (unlike `st.button`/`.text_input`/`.file_uploader`) — edits
+are simulated the way Streamlit's own widget mechanism represents them internally, by writing a
+`DataEditorState`-shaped dict directly into `st.session_state[<data_editor key>]` before the
+next `at.run()` (confirmed empirically against the real widget before writing the suite).
+Covers: the seeded schema renders exactly 2 grids with shapes `(10, 6)` and `(13, 6)` and the 6
+expected columns; a cell edit's 4 fields land correctly in `resolution_results` and **survive a
+further no-op rerun** (not silently reset); a schema reconfigured through the **real Config
+tab** (a table added, Table 2 deleted, a column with a custom name added to Table 1) re-renders
+with zero hardcoded assumptions — Table 1's grid grows from 10 to 11 rows, the new custom
+column name appears as its own row, and a still-columnless new table correctly shows its caption
+instead of an empty/broken grid; and the zero-tables edge case renders the empty-state message
+cleanly. One real test-design bug was caught and fixed along the way: a 0-column table correctly
+renders *no* `data_editor` at all — my first draft's expected dataframe count was wrong, not the
+module's behavior. Full regression suite (all 11 test files) passes clean; also confirmed
+against the real production DB (still holding the untouched seeded 10/13-row schema).*
 
 ### [ ] 4.2 — Confidence flagging + manual re-search
 Flag any row without a clean high-confidence match as flagged/incomplete — never silently blank,
