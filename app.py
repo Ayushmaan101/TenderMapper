@@ -21,7 +21,7 @@ from db.connection import DEFAULT_DB_PATH, get_connection
 from db.schema import init_db
 from ingest.ui import render_upload_section
 from run.export_ui import render_export_section
-from run.results import render_results_section
+from run.results import is_mapping_complete, render_results_section
 from run.run_button import render_run_button
 from run.secrets_bootstrap import bootstrap_groq_api_key
 from run.session_reset import render_next_company_button
@@ -74,14 +74,20 @@ with run_tab:
     render_run_button(conn)
     st.divider()
     st.subheader("Results")
-    st.caption(
-        "Auto-populated by “Run Mapping” (OCR/text-layer resolution, then "
-        "per-column BM25-search + Groq-verify) — correct any flagged or wrong "
-        "cell directly, edits persist for this session."
-    )
-    render_results_section(conn)
+    if is_mapping_complete():
+        st.caption(
+            "Auto-populated by “Run Mapping” (OCR/text-layer resolution, then "
+            "per-column BM25-search + Groq-verify) — correct any flagged or wrong "
+            "cell directly, edits persist for this session."
+        )
+        render_results_section(conn)
+        render_export_section(conn)
+    else:
+        st.info(
+            "Upload tender documents above and click “▶️ Run Mapping” to populate "
+            "compliance results."
+        )
     render_next_company_button()
-    render_export_section(conn)
 
 with config_tab:
     st.header("Config")

@@ -7,14 +7,18 @@ reference_index/ocr_cache), click "Next Company", then assert all four
 clear conditions plus a DB fingerprint, then confirm Company B can load
 cleanly with zero residual state from Company A.
 
-Note on "resolution_results cleared": reset_run_state() sets it to {},
-but app.py's very next render (within the same at.run() call, since
-Streamlit executes an on_click callback and the subsequent script pass
-together) re-populates it via run/results.py's own read-back-and-write-
-back persistence cycle (checklist 4.1) - with every entry now equal to
-the blank placeholder. This is correct, not a leak: "cleared" is
-verified as "every entry is functionally blank" (confidence 0.0,
-success False, empty strings), not "the dict object is literally {}".
+Note on "resolution_results cleared": reset_run_state() sets it to {} AND
+clears mapping_has_run, which puts the Results section back behind the
+pre-run gate - app.py's next render no longer even calls
+render_results_section() (it shows the pre-run placeholder instead), so
+resolution_results genuinely stays an empty dict post-reset, not merely
+a dict of blank placeholder entries. The "every entry is functionally
+blank" assertions below hold either way (vacuously true over an empty
+dict), kept as a stricter check in case that ever changes.
+
+Also covers: the pre-run gate (checklist "Run tab UI lifecycle") hiding
+the Results grid and re-search controls both on a fresh cold start and
+immediately after a "Next Company" reset.
 
 Run: python tests/verify_next_company_reset.py
 """
@@ -67,8 +71,19 @@ def main() -> None:
 
         app_path = str(Path(__file__).resolve().parent.parent / "app.py")
         at = AppTest.from_file(app_path)
-        at.run()
+        at.run(timeout=30)  # first run pays full module-import cost; default 3s is too tight
         check("initial launch, no exception", not at.exception)
+
+        # --- fresh cold start: Results grid + re-search controls completely hidden ---
+        check("cold start: zero results grids rendered", len(list(at.dataframe)) == 0)
+        check(
+            "cold start: zero re-search expanders rendered",
+            not any("Manual Re-Search" in (e.label or "") for e in at.expander),
+        )
+        check(
+            "cold start: the pre-run placeholder callout is shown instead",
+            any("Run Mapping" in str(el.value) for el in at.info),
+        )
 
         fingerprint_before_anything = db_fingerprint(db_path)
 
@@ -89,6 +104,15 @@ def main() -> None:
             "Company A's uploaded document has the right name",
             at.session_state["ingested_documents"][0].name == "CompanyA_certificate.pdf",
         )
+
+        # This suite tests reset behavior, not the real OCR/Groq pipeline
+        # (see verify_column_resolution_*.py for that) - simulate "Run
+        # Mapping" having completed by setting the flag it sets, so the
+        # gated results/re-search UI renders and resolution_results exists
+        # to inject mock values into below.
+        at.session_state["mapping_has_run"] = True
+        at.run()
+        check("simulated run-completion -> no exception", not at.exception)
 
         # Mock resolved results: a couple of high-confidence, a couple flagged.
         for cid, conf in [(1, 0.95), (2, 0.88), (3, 0.3), (4, 0.0)]:
@@ -122,6 +146,18 @@ def main() -> None:
         at.get_by_key("next_company_button").click()
         at.run()
         check("Next Company click -> no exception", not at.exception)
+
+        # --- immediately after reset: back behind the pre-run gate ---
+        check("post-reset: zero results grids rendered", len(list(at.dataframe)) == 0)
+        check(
+            "post-reset: zero re-search expanders rendered",
+            not any("Manual Re-Search" in (e.label or "") for e in at.expander),
+        )
+        check(
+            "post-reset: the pre-run placeholder callout is shown again",
+            any("Run Mapping" in str(el.value) for el in at.info),
+        )
+        check("post-reset: mapping_has_run flag cleared", at.session_state["mapping_has_run"] is False)
 
         # --- 1. company name reset to empty ---
         check("company name field is empty after reset", at.session_state["company_name"] == "")

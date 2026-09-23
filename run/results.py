@@ -70,7 +70,22 @@ reset_run_state() clears every key in the contract above, plus
 RESULTS_KEY - called by run/session_reset.py's "Next Company" handler.
 Resets to `None`/`{}` rather than deleting the keys outright, so any
 code that reads them via st.session_state[...] (not .get(...)) keeps
-working immediately after a reset without a KeyError.
+working immediately after a reset without a KeyError. It also resets
+HAS_RUN_KEY to False, putting the UI back behind the pre-run gate below.
+
+Run-completion gate (checklist "Run tab UI lifecycle")
+--------------------------------------------------------
+HAS_RUN_KEY tracks whether "Run Mapping" has completed at least once for
+the current company. app.py uses is_mapping_complete() to decide whether
+to render this module's output (and run/export_ui.py's download button)
+at all, versus a single placeholder callout - a fresh boot or a page
+right after "Next Company" would otherwise flood the screen with all-
+flagged rows and one re-search control per row before the reviewer has
+uploaded anything to search. run/run_button.py sets it True only once
+resolve_all_columns() has actually produced a results dict; the early
+"nothing to run" returns (empty upload, empty config, zero documents
+processed) never set it, so those states correctly keep showing the
+placeholder rather than an empty/misleading grid.
 
 The reviewer's custom terms drive BM25 RETRIEVAL only (query =
 tokenize(custom_terms) alone, no stored synonyms mixed in - the
@@ -110,6 +125,7 @@ CORPUS_INDEX_KEY = "corpus_index"  # st.session_state[CORPUS_INDEX_KEY]: search.
 PAGE_TEXTS_KEY = "page_texts"  # st.session_state[PAGE_TEXTS_KEY]: dict[(pdf_name, page_number), str]
 REFERENCE_INDEX_KEY = "reference_index"  # st.session_state[REFERENCE_INDEX_KEY]: ocr.references.ReferenceIndex | None
 OCR_CACHE_KEY = "ocr_cache"  # st.session_state[OCR_CACHE_KEY]: dict[(pdf_name, page_number), OcrPageResult]
+HAS_RUN_KEY = "mapping_has_run"  # st.session_state[HAS_RUN_KEY]: bool - has "Run Mapping" completed for this company yet?
 
 _BLANK_RESULT = VerificationResult(
     pdf_name="", page_number_or_range="", confidence=0.0, match_snippet="",
@@ -117,18 +133,28 @@ _BLANK_RESULT = VerificationResult(
 )
 
 
+def is_mapping_complete() -> bool:
+    """True once "Run Mapping" has produced a real results dict for the
+    current company. Gates the Results grid, summary metrics, manual
+    re-search controls, and the Excel export button - see module
+    docstring's "Run-completion gate" section.
+    """
+    return bool(st.session_state.get(HAS_RUN_KEY, False))
+
+
 def reset_run_state() -> None:
     """Clears every session-state key this module's search-index
     contract owns: resolved results, the BM25 corpus index, extracted
-    page texts, the reference index, and the OCR cache. Called by
-    run/session_reset.py's "Next Company" handler. Touches nothing in
-    db/crud.py or the SQLite connection.
+    page texts, the reference index, the OCR cache, and the run-
+    completion flag. Called by run/session_reset.py's "Next Company"
+    handler. Touches nothing in db/crud.py or the SQLite connection.
     """
     st.session_state[RESULTS_KEY] = {}
     st.session_state[CORPUS_INDEX_KEY] = None
     st.session_state[PAGE_TEXTS_KEY] = {}
     st.session_state[REFERENCE_INDEX_KEY] = None
     st.session_state[OCR_CACHE_KEY] = {}
+    st.session_state[HAS_RUN_KEY] = False
 
 
 def render_results_section(conn: sqlite3.Connection) -> None:
@@ -226,7 +252,7 @@ def render_results_section(conn: sqlite3.Connection) -> None:
                 success=True if changed else existing.success,
             )
 
-        _render_manual_research(table, columns, results_store)
+    _render_manual_research(all_columns, results_store)
 
     st.session_state[RESULTS_KEY] = results_store
 
@@ -258,25 +284,61 @@ def _render_table_summary(columns: list[SchemaColumn], results_store: dict[int, 
 # ---------------------------------------------------------- manual re-search --
 
 
-def _render_manual_research(table, columns: list[SchemaColumn], results_store: dict[int, VerificationResult]) -> None:
-    flagged_columns = [c for c in columns if is_flagged(results_store.get(c.id, _BLANK_RESULT))]
+def _short_requirement_label(requirement_text: str, *, max_len: int = 50) -> str:
+    """A compact label for the re-search dropdown. Several seeded
+    requirements lead with a short title before an em-dash (e.g. "WHO
+    GMP/GMA Certificate — Scanned copy of valid...") - use that when
+    present, since it's already exactly the right length; otherwise fall
+    back to a truncated prefix of the full requirement text.
+    """
+    if "—" in requirement_text:  # em dash
+        return requirement_text.split("—", 1)[0].strip()
+    if len(requirement_text) <= max_len:
+        return requirement_text
+    return requirement_text[: max_len - 3].rstrip() + "..."
+
+
+def _render_manual_research(all_columns: list[SchemaColumn], results_store: dict[int, VerificationResult]) -> None:
+    """A single consolidated expander covering every flagged column
+    across every table, rather than one top-level expander per flagged
+    row - a schema with many flagged items used to flood the screen with
+    stacked expanders before a reviewer could get to the bottom of the
+    page. Only one flagged column's search box/button render at a time
+    (whichever is picked in the dropdown), keyed by that column's id so
+    switching the selection starts from a blank custom-terms box rather
+    than carrying over unrelated text.
+    """
+    flagged_columns = [c for c in all_columns if is_flagged(results_store.get(c.id, _BLANK_RESULT))]
     if not flagged_columns:
         return
 
-    st.markdown(f"**Search again with custom terms** ({len(flagged_columns)} flagged row(s))")
-    for col in flagged_columns:
-        with st.expander(f"\U0001f50d {col.name}"):
-            custom_terms = st.text_input(
-                "Custom search terms",
-                key=f"custom_terms_{col.id}",
-                placeholder="Type the exact term you see in the document, e.g. a certificate number or heading",
+    with st.expander(f"⚠️ Manual Re-Search: Review Flagged Items ({len(flagged_columns)} flagged)"):
+        labels = {
+            col.id: (
+                f"❗ {col.name}: {_short_requirement_label(col.requirement_text)} "
+                f"(Confidence: {results_store.get(col.id, _BLANK_RESULT).confidence:.2f})"
             )
-            if st.button("Search again", key=f"research_{col.id}"):
-                if not custom_terms.strip():
-                    st.warning("Enter some search terms first.")
-                else:
-                    _run_manual_research(col, custom_terms, results_store)
-                    st.rerun()
+            for col in flagged_columns
+        }
+        selected_id = st.selectbox(
+            "Flagged item to re-search",
+            options=[col.id for col in flagged_columns],
+            format_func=lambda cid: labels[cid],
+            key="manual_research_column_select",
+        )
+        selected_column = next(c for c in flagged_columns if c.id == selected_id)
+
+        custom_terms = st.text_input(
+            "Custom search terms",
+            key=f"custom_terms_{selected_column.id}",
+            placeholder="Type the exact term you see in the document, e.g. a certificate number or heading",
+        )
+        if st.button("Search again", key=f"research_{selected_column.id}"):
+            if not custom_terms.strip():
+                st.warning("Enter some search terms first.")
+            else:
+                _run_manual_research(selected_column, custom_terms, results_store)
+                st.rerun()
 
 
 def _run_manual_research(column: SchemaColumn, custom_terms: str, results_store: dict[int, VerificationResult]) -> None:

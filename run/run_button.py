@@ -26,7 +26,7 @@ import streamlit as st
 from db import crud
 from ingest.ui import DOCUMENTS_KEY
 from run.pipeline_runner import resolve_all_columns, run_ocr_and_build_index
-from run.results import CORPUS_INDEX_KEY, OCR_CACHE_KEY, PAGE_TEXTS_KEY, REFERENCE_INDEX_KEY, RESULTS_KEY
+from run.results import CORPUS_INDEX_KEY, HAS_RUN_KEY, OCR_CACHE_KEY, PAGE_TEXTS_KEY, REFERENCE_INDEX_KEY, RESULTS_KEY
 
 
 def render_run_button(conn: sqlite3.Connection) -> None:
@@ -94,6 +94,7 @@ def _run_mapping(conn: sqlite3.Connection) -> None:
     resolve_progress.empty()
 
     st.session_state[RESULTS_KEY] = results
+    st.session_state[HAS_RUN_KEY] = True
 
     resolved_count = sum(1 for r in results.values() if r.success and r.confidence >= 0.70)
     st.success(f"Resolved {resolved_count} of {len(results)} requirement(s) with high confidence.")

@@ -794,3 +794,45 @@ crash app startup, and that the app stays fully interactive afterward. **Full re
 (18 top-level test files, the widest run yet in this project) passes clean; also confirmed
 against the real production DB** via a direct `AppTest` boot with `st.cache_resource.clear()`
 first.*
+
+### [x] 5.3 — Run tab UI lifecycle & reviewer control decluttering
+User-directed post-completion refinement (not part of the original numbered checklist; folded
+into Phase 5). On a fresh boot or right after "Next Company", the Results section rendered
+every row as ⚠️ Flagged (0.00) and stacked one "Search again" expander per flagged column down
+the whole screen before the reviewer had uploaded anything to search against.
+✅ *Done 2026-09-23 — **Run-completion gate**: new `run/results.py::HAS_RUN_KEY`
+(`st.session_state["mapping_has_run"]`) + `is_mapping_complete()`. `app.py`'s Results section
+now only calls `render_results_section`/`render_export_section` when `is_mapping_complete()` is
+true; otherwise it shows one placeholder callout ("Upload tender documents above and click
+'▶️ Run Mapping' to populate compliance results.") in their place. `run/run_button.py` sets the
+flag only once `resolve_all_columns()` has actually produced a results dict — never on the
+early "nothing to run" returns (empty upload, empty config, zero documents processed), so those
+states correctly keep showing the placeholder too. `run/results.py::reset_run_state()`
+(checklist 4.3) clears the flag back to `False`, so "Next Company" returns to the same pre-run
+placeholder rather than a stale-looking empty grid.
+**Consolidated manual re-search**: `run/results.py::_render_manual_research` now takes
+`all_columns` across every table (not one call per table) and renders exactly ONE
+`st.expander("⚠️ Manual Re-Search: Review Flagged Items (N flagged)")` — only when at least one
+column is flagged — containing a single `st.selectbox` listing every flagged column (options
+prefixed `❗`, e.g. `❗ Item 4: WHO GMP/GMA Certificate (Confidence: 0.00)`, via new
+`_short_requirement_label()`: the part of `requirement_text` before its em dash when present,
+else a truncated prefix) and one custom-terms box + "Search again" button scoped to whichever
+column is currently selected (`custom_terms_{id}`/`research_{id}`, same keys as before, so
+switching the dropdown starts from a blank box rather than carrying over unrelated text).
+**Verification**: reworked five existing `AppTest` suites for the new gate/consolidation —
+`verify_results_ui.py`, `verify_manual_research_ui.py`, `verify_error_handling_ui.py`,
+`verify_excel_export_ui.py`, `verify_next_company_reset.py`. Suites that intentionally bypass
+the real OCR/Groq pipeline (injecting `resolution_results` directly, per their own established
+style) now set `mapping_has_run = True` directly to simulate a completed run before exercising
+the gated UI; suites that already drive the real "▶️ Run Mapping" button needed no change there.
+`verify_next_company_reset.py` and `verify_results_ui.py` gained explicit assertions that the
+grid, summary metrics, and re-search expander are ALL absent (and the placeholder IS present)
+both on a fresh cold start and immediately after a "Next Company" click — directly covering this
+item's own verification requirement. `verify_manual_research_ui.py` was the most substantially
+reworked: dropdown-option assertions (`Selectbox.options`, the formatted display strings)
+replace the old per-column-expander-presence assertions, and `Selectbox.select(column_id)` is
+used to switch the target column before interacting with that column's now-conditionally-
+rendered text box/button (two-step: select + rerun to regenerate the tree with the new column's
+widgets, only then interact with them — a real `AppTest` mechanic, not simplifiable to one
+`.run()`). **Full regression suite (18 top-level test files) passes clean; also confirmed
+against the real production DB.***

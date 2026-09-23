@@ -1,4 +1,5 @@
-"""Checklist 4.2 verification (AppTest).
+"""Checklist 4.2 verification (AppTest), updated for the Run tab
+lifecycle/consolidated re-search refinement.
 
 Covers: confidence flagging surfacing correctly in the UI (status text
 per row, summary metrics) both for the all-unresolved starting state and
@@ -8,8 +9,10 @@ result is provably untouched; a database fingerprint (every
 table/column/synonym in the real config DB) staying byte-identical
 across a manual re-search, confirming zero SQLite side effects; graceful
 handling when no corpus index has been built yet (checklist 3.3 not
-wired in); and a row that clears the threshold via re-search flipping
-from Flagged to Resolved and losing its re-search expander.
+wired in); a row that clears the threshold via re-search flipping from
+Flagged to Resolved and dropping out of the dropdown's options; and the
+single consolidated "Manual Re-Search" expander (not one per flagged
+row) whose selectbox drives which column's search box/button render.
 
 Run: python tests/verify_manual_research_ui.py
 """
@@ -83,8 +86,29 @@ def main() -> None:
 
         app_path = str(Path(__file__).resolve().parent.parent / "app.py")
         at = AppTest.from_file(app_path)
-        at.run()
+        at.run(timeout=30)  # first run pays full module-import cost; default 3s is too tight
         check("initial launch, no exception", not at.exception)
+
+        # --- pre-run gate: nothing results-related renders before "Run Mapping" ---
+        check("pre-run: zero metrics rendered", len(list(at.get("metric"))) == 0)
+        check("pre-run: zero results grids rendered", len(list(at.dataframe)) == 0)
+        check(
+            "pre-run: zero re-search expanders rendered",
+            not any("Manual Re-Search" in (e.label or "") for e in at.expander),
+        )
+        check(
+            "pre-run: the placeholder callout is shown instead",
+            any("Run Mapping" in str(el.value) for el in at.info),
+        )
+
+        # This suite intentionally bypasses the real OCR/Groq pipeline for
+        # phase 1 (see verify_column_resolution_*.py for that end-to-end
+        # coverage) and injects resolution_results directly - simulate
+        # "Run Mapping" having completed the same way, by setting the flag
+        # it sets, so the gated UI below renders.
+        at.session_state["mapping_has_run"] = True
+        at.run()
+        check("simulated run-completion -> no exception", not at.exception)
 
         # --- flagging: fresh/all-unresolved state ---
         metrics = {m.label: m.value for m in at.get("metric")}
@@ -94,7 +118,17 @@ def main() -> None:
 
         table1_grid = next(df for df in at.dataframe if len(df.value) == 10)
         check("every row in the fresh grid shows the Flagged status", all("Flagged" in s for s in table1_grid.value["Status"]))
-        check("23 re-search expanders exist (one per flagged column)", len([e for e in at.expander if "\U0001f50d" in (e.label or "")]) == 23)
+
+        research_expanders = [e for e in at.expander if "Manual Re-Search" in (e.label or "")]
+        check("exactly ONE consolidated re-search expander (not one per flagged row)", len(research_expanders) == 1)
+        check("consolidated expander's title shows the correct flagged count (23)", "(23 flagged)" in research_expanders[0].label)
+
+        select = at.get_by_key("manual_research_column_select")
+        check("dropdown lists all 23 flagged columns", len(select.options) == 23)
+        check(
+            "dropdown entries are prefixed with an exclamation mark and show name + confidence",
+            all(opt.startswith("❗") and "Confidence: 0.00" in opt for opt in select.options),
+        )
 
         # --- inject some results: one high-confidence, one low-confidence ---
         at.session_state["resolution_results"][1] = replace(
@@ -117,16 +151,27 @@ def main() -> None:
         check("the 0.95-confidence row shows Resolved", "Resolved" in status_by_column["Item 1"])
         check("the 0.4-confidence row still shows Flagged", "Flagged" in status_by_column["Item 2"])
         check("an untouched (still-blank) row also shows Flagged", "Flagged" in status_by_column["Item 3"])
+
+        research_expanders = [e for e in at.expander if "Manual Re-Search" in (e.label or "")]
+        check("still exactly ONE consolidated expander", len(research_expanders) == 1)
+        check("expander's title now shows the reduced flagged count (22)", "(22 flagged)" in research_expanders[0].label)
+
+        select = at.get_by_key("manual_research_column_select")
         check(
-            "column 1 (now resolved) no longer has a re-search expander",
-            not any(e.label == "\U0001f50d Item 1" for e in at.expander),
+            "column 1 (now resolved) no longer appears in the dropdown's options",
+            not any(opt.startswith("❗ Item 1:") for opt in select.options),
         )
         check(
-            "column 2 (still flagged) still has a re-search expander",
-            any(e.label == "\U0001f50d Item 2" for e in at.expander),
+            "column 2 (still flagged) still appears in the dropdown's options",
+            any(opt.startswith("❗ Item 2:") for opt in select.options),
         )
 
         # --- manual re-search: no corpus index yet -> graceful message, no crash ---
+        # (select column 3 first - a fresh selectbox defaults to its first
+        # option, which is no longer necessarily column 3 now that column 1
+        # dropped out of the flagged list)
+        at.get_by_key("manual_research_column_select").select(3)
+        at.run()
         at.get_by_key("custom_terms_3").set_value("some custom term")
         at.get_by_key("research_3").click()
         at.run()
@@ -177,10 +222,15 @@ def main() -> None:
         table1_grid_after = next(df for df in at.dataframe if len(df.value) == 10)
         status_by_column_after = dict(zip(table1_grid_after.value["Column"], table1_grid_after.value["Status"]))
         check("re-searched column (0.88 >= 0.70) now shows Resolved", "Resolved" in status_by_column_after["Item 3"])
+
+        select_after = at.get_by_key("manual_research_column_select")
         check(
-            "the now-resolved column no longer offers a re-search expander",
-            not any(e.label == "\U0001f50d Item 3" for e in at.expander),
+            "the now-resolved column no longer appears in the dropdown's options",
+            not any(opt.startswith("❗ Item 3:") for opt in select_after.options),
         )
+        research_expanders_after = [e for e in at.expander if "Manual Re-Search" in (e.label or "")]
+        check("still exactly ONE consolidated expander after the re-search", len(research_expanders_after) == 1)
+        check("expander's title reflects the further-reduced flagged count (21)", "(21 flagged)" in research_expanders_after[0].label)
 
         # --- DB fingerprint: zero SQLite side effects from the manual re-search ---
         fingerprint_after = db_fingerprint(db_path)
@@ -188,6 +238,8 @@ def main() -> None:
 
         # --- empty custom terms -> warning shown, no re-search executed ---
         install_fake_groq(confidence=0.5)  # would be a NEW distinguishable value if wrongly invoked
+        at.run()
+        at.get_by_key("manual_research_column_select").select(4)
         at.run()
         result4_before = at.session_state["resolution_results"].get(4)
         at.get_by_key("custom_terms_4").set_value("   ")  # whitespace only

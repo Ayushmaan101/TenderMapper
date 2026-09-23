@@ -50,8 +50,23 @@ def main() -> None:
 
         app_path = str(Path(__file__).resolve().parent.parent / "app.py")
         at = AppTest.from_file(app_path)
-        at.run()
+        at.run(timeout=30)  # first run pays full module-import cost; default 3s is too tight
         check("initial launch (seeded schema), no exception", not at.exception)
+
+        # --- pre-run gate: nothing results-related renders until "Run Mapping" completes ---
+        check("pre-run: zero results grids rendered", len(list(at.dataframe)) == 0)
+        check(
+            "pre-run: the placeholder callout is shown instead",
+            any("Run Mapping" in str(el.value) for el in at.info),
+        )
+
+        # This suite intentionally bypasses the real OCR/Groq pipeline (see
+        # tests/verify_column_resolution_*.py for that end-to-end coverage)
+        # and injects resolution_results directly - simulate "Run Mapping"
+        # having completed the same way, by setting the flag it sets.
+        at.session_state["mapping_has_run"] = True
+        at.run()
+        check("simulated run-completion -> no exception", not at.exception)
 
         # --- seeded schema: 2 data_editor grids, shapes matching 10 and 13 rows ---
         dataframes = list(at.dataframe)

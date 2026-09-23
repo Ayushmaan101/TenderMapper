@@ -194,9 +194,14 @@ def main() -> None:
         at5.run()
         check("Run Mapping with an empty config -> no exception", not at5.exception)
         check("a clear 'no tables configured' warning is shown", any("No compliance tables configured" in w.value for w in at5.warning))
+        # Run Mapping's own early-return means mapping_has_run never gets
+        # set, so the Results section stays behind the pre-run gate -
+        # correct behavior, since Run Mapping's warning above already
+        # explains why nothing happened; the section doesn't need its own
+        # separate empty-config message on top of that.
         check(
-            "the Results section separately shows its own informative empty-config message",
-            any("No tables configured yet" in i.value for i in at5.info),
+            "the Results section stays behind the pre-run gate (never attempted to render with zero tables)",
+            any("Run Mapping" in i.value for i in at5.info),
         )
 
         # ============================================================
@@ -205,6 +210,8 @@ def main() -> None:
         # auto-resolution loop isn't wired in yet)
         # ============================================================
         at6 = fresh_app("scenario6.db")  # GROQ_API_KEY is blank in this whole suite's environment
+        at6.session_state["mapping_has_run"] = True  # simulate a completed run so the gated results/re-search UI renders
+        at6.run()
 
         # 6a. Config-time synonym expansion with a missing key.
         at6.get_by_key("newcol_name_1").set_value("Resilience Test Col")
@@ -224,11 +231,12 @@ def main() -> None:
         at6.session_state["page_texts"] = {("a.pdf", 1): pages[0].text}
         at6.run()
 
-        flagged_expanders = [e for e in at6.expander if e.label and e.label.startswith("\U0001f50d")]
-        check("at least one flagged column's re-search expander is available to test against", len(flagged_expanders) > 0)
-        if flagged_expanders:
-            # Extract the column id from an expander we know the key pattern for.
-            first_col_id = 1
+        research_expanders = [e for e in at6.expander if e.label and "Manual Re-Search" in e.label]
+        check("the consolidated re-search expander is available to test against", len(research_expanders) > 0)
+        if research_expanders:
+            first_col_id = 1  # still flagged - no real run happened, every column is a blank/unresolved placeholder
+            at6.get_by_key("manual_research_column_select").select(first_col_id)
+            at6.run()
             at6.get_by_key(f"custom_terms_{first_col_id}").set_value("some content")
             at6.get_by_key(f"research_{first_col_id}").click()
             at6.run()

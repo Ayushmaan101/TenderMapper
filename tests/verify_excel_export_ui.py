@@ -50,8 +50,20 @@ def main() -> None:
 
         app_path = str(Path(__file__).resolve().parent.parent / "app.py")
         at = AppTest.from_file(app_path)
-        at.run()
+        at.run(timeout=30)  # first run pays full module-import cost; default 3s is too tight
         check("initial launch, no exception", not at.exception)
+        check(
+            "pre-run: the export button is hidden behind the run-completion gate",
+            "export_download_button" not in {b.key for b in at.download_button},
+        )
+
+        # This suite tests export WIRING/CONTENT, not the real OCR/Groq
+        # pipeline (see verify_column_resolution_*.py for that) - simulate
+        # "Run Mapping" having completed by setting the flag it sets, same
+        # as the other UI suites reworked for this gate.
+        at.session_state["mapping_has_run"] = True
+        at.run()
+        check("simulated run-completion -> no exception", not at.exception)
 
         download_button = at.get_by_key("export_download_button")
         check("the export download button renders", download_button is not None)

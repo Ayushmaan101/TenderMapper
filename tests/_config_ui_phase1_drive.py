@@ -37,7 +37,7 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 
 def run_ok(at: AppTest, label: str) -> None:
-    at.run()
+    at.run(timeout=15)  # default 3s is occasionally too tight for this app's now-larger startup/import cost
     if at.exception:
         print(f"FAIL {label}: exception during run: {at.exception}")
         sys.exit(1)
