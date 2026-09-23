@@ -127,7 +127,24 @@ def test_pipeline_runner_isolates_bad_documents() -> None:
         IngestedDocument(name="valid2.pdf", data=make_valid_pdf_bytes("Second valid document, different content."), source_path="valid2.pdf"),
     ]
 
-    outcome, corpus_index, page_texts, reference_index = run_ocr_and_build_index(documents)
+    doc_progress_calls: list = []
+    outcome, corpus_index, page_texts, reference_index = run_ocr_and_build_index(
+        documents,
+        document_progress_callback=lambda i, total, name: doc_progress_calls.append((i, total, name)),
+    )
+
+    check(
+        "document_progress_callback fires once per document (5 total), including the ones that go on to fail",
+        len(doc_progress_calls) == 5,
+    )
+    check(
+        "document_progress_callback reports 1-based (index, total) pairs in upload order",
+        [c[:2] for c in doc_progress_calls] == [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)],
+    )
+    check(
+        "document_progress_callback names match the documents in order, corrupt/encrypted included",
+        [c[2] for c in doc_progress_calls] == ["valid1.pdf", "corrupt.pdf", "secret.pdf", "empty.pdf", "valid2.pdf"],
+    )
 
     check("2 of 5 documents genuinely failed (corrupt + encrypted)", outcome.skipped_document_count == 2)
     check(
@@ -245,7 +262,7 @@ def test_groq_missing_key_and_network_drop_fallback() -> None:
         check("config/synonyms.py: missing key -> success=False, does not raise", syn_result.success is False)
 
         candidate = SearchCandidate(pdf_name="a.pdf", page_number=1, rank=1, score=1.0, snippet="s", matched_terms=[], match_signals=["bm25"])
-        verify_result = gv_mod.verify_candidate("Column", "Some requirement text", candidate, "page text")
+        verify_result = gv_mod.resolve_column("Column", "Some requirement text", [candidate], {})
         check("verify/groq_verifier.py: missing key -> success=False, does not raise", verify_result.success is False)
         check("verify/groq_verifier.py: missing key -> confidence is 0.0 (never a fake match)", verify_result.confidence == 0.0)
     finally:
@@ -277,7 +294,7 @@ def test_groq_missing_key_and_network_drop_fallback() -> None:
         original_gv_groq = gv_mod.Groq
         gv_mod.Groq = _FailingClient
         try:
-            verify_result2 = gv_mod.verify_candidate("Column", "req", candidate, "text")
+            verify_result2 = gv_mod.resolve_column("Column", "req", [candidate], {})
             check("verify/groq_verifier.py: simulated network drop -> success=False, does not raise", verify_result2.success is False)
             check("verify/groq_verifier.py: simulated network drop -> confidence 0.0, error explains why", verify_result2.confidence == 0.0 and bool(verify_result2.error))
         finally:

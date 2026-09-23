@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -38,9 +39,14 @@ def check(label: str, condition: bool) -> None:
 
 def install_fake_groq(call_log: list, high_confidence_column: str, marker: str, low_confidence=0.1, high_confidence=0.93):
     """Content-aware, matching the discrimination bug fix from
-    verify_column_resolution_unit.py: the marker is checked ONLY in the
-    "Page text:" section of the prompt, not the whole prompt (which also
-    carries the requirement text and could otherwise trivially self-match).
+    verify_column_resolution_unit.py: the marker is checked ONLY within
+    a single [Candidate N] block's own text, never the whole prompt
+    (which also carries the requirement text and could otherwise
+    trivially self-match). Batched design (Groq rate-limit fix): the
+    response schema is now {best_candidate, confidence, ...} - the fake
+    reports whichever candidate NUMBER actually contains the marker,
+    rather than echoing a pdf_name/page string (which the real code
+    never trusts anyway).
     """
     import verify.groq_verifier as gv
 
@@ -48,11 +54,20 @@ def install_fake_groq(call_log: list, high_confidence_column: str, marker: str, 
         def create(self, **kwargs):
             call_log.append(kwargs)
             user_content = kwargs["messages"][1]["content"]
-            page_text_section = user_content.split("Page text:\n", 1)[-1]
             is_target_column = f"Requirement column: {high_confidence_column}" in user_content
-            confidence = high_confidence if (is_target_column and marker in page_text_section) else low_confidence
+
+            best_candidate = 0
+            confidence = low_confidence
+            if is_target_column:
+                blocks = re.split(r"\[Candidate (\d+)\]", user_content)
+                for i in range(1, len(blocks), 2):
+                    if marker in blocks[i + 1]:
+                        best_candidate = int(blocks[i])
+                        confidence = high_confidence
+                        break
+
             content = json.dumps({
-                "pdf_name": "ECHO-IGNORED.pdf", "page_number_or_range": "999",
+                "best_candidate": best_candidate,
                 "confidence": confidence, "match_snippet": "WHO-GMP certificate content matched here", "reasoning": "evaluated",
             })
             message = type("M", (), {"content": content})()
@@ -104,12 +119,41 @@ def main() -> None:
         # Groq is mocked, but OCR is real (PaddleOCR/Tesseract on the
         # synthetic scanned page) - AppTest's default 3s timeout is far
         # too short for real OCR (checklist 0.5 measured ~50s just for
-        # PaddleOCR's own first-use initialization).
-        at.run(timeout=120)
+        # PaddleOCR's own first-use initialization). Also real now:
+        # resolve_all_columns()'s ~1s-per-column submission stagger
+        # (Groq rate-limit fix) across 23 seeded columns adds ~22s more -
+        # left at its real default here deliberately (this is the one
+        # suite that drives the actual production button end-to-end), so
+        # the timeout is bumped further to give it comfortable room.
+        at.run(timeout=180)
         check("Run Mapping (full pipeline, mocked Groq) -> no exception", not at.exception)
 
         results = at.session_state["resolution_results"]
         check("resolution_results auto-populates for all 23 seeded columns", len(results) == 23)
+        check(
+            "a 23-column run makes EXACTLY 23 Groq API calls total (one batched call per column, not one per candidate)",
+            len(call_log) == 23,
+        )
+        print(f"Terminal log: {len(call_log)} Groq API call(s) made resolving {len(results)} column(s).")
+
+        # --- real-time streaming (Groq rate-limit fix): once the run
+        # completes, the live preview placeholders (document counter,
+        # OCR page progress, live results table) must have been cleared
+        # via st.empty() - only the FINAL interactive grid (checklist
+        # 4.1's st.data_editor-backed dataframes, one per table) should
+        # remain in the rendered tree. AppTest can only inspect the tree
+        # AFTER the whole script finishes (it can't observe the
+        # mid-script incremental renders themselves), so this confirms
+        # the placeholders were correctly torn down rather than leaking
+        # stale progress text into the final page. ---
+        check(
+            "no leftover 'Processing document' counter text after the run completes",
+            not any("Processing document" in str(el.value) for el in at.markdown),
+        )
+        check(
+            "no lingering combined 'Table' + 'Status' live-preview dataframe remains (only the upload list + the 2 final per-table grids)",
+            not any("Table" in df.value.columns and "Status" in df.value.columns for df in at.dataframe),
+        )
 
         # --- find the "Item 4" column's id via the Config tab's real data ---
         from db import crud

@@ -84,6 +84,18 @@ def main() -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
 
+    import run.pipeline_runner as pipeline_runner_mod
+
+    # resolve_all_columns() staggers Groq-call submissions by
+    # COLUMN_SUBMIT_DELAY_SECONDS (default 1.0s) per column to respect
+    # rate limits in production - irrelevant here (GROQ_API_KEY is blank
+    # for this whole suite, so every call short-circuits with zero
+    # network I/O) but still real wall-clock time against ~23 seeded
+    # columns. Zeroed for this suite's speed; resolved fresh per call by
+    # resolve_all_columns (not baked into a function default), so this
+    # monkeypatch takes effect for every real "Run Mapping" click below.
+    pipeline_runner_mod.COLUMN_SUBMIT_DELAY_SECONDS = 0.0
+
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         os.environ["GROQ_API_KEY"] = ""
         app_path = str(Path(__file__).resolve().parent.parent / "app.py")

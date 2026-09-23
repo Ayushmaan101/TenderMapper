@@ -53,11 +53,16 @@ def db_fingerprint(db_path: str) -> tuple:
     return tuple(fingerprint)
 
 
-def install_fake_groq(confidence: float, pdf_name="ignored-echo.pdf", page="ignored-echo"):
+def install_fake_groq(confidence: float, best_candidate: int = 1):
+    """Batched design (Groq rate-limit fix): the response schema is now
+    {best_candidate, confidence, ...} - best_candidate is a 1-based index
+    into whatever candidate pool the real code actually sent, never a
+    free-text pdf_name/page echo.
+    """
     import verify.groq_verifier as gv
 
     content = json.dumps({
-        "pdf_name": pdf_name, "page_number_or_range": page,
+        "best_candidate": best_candidate,
         "confidence": confidence, "match_snippet": "matched snippet text", "reasoning": "reasoning text",
     })
 
@@ -191,7 +196,11 @@ def main() -> None:
 
         fingerprint_before = db_fingerprint(db_path)
 
-        install_fake_groq(confidence=0.88, pdf_name="MODEL-HALLUCINATED-NAME.pdf", page="999")
+        # best_candidate=999 is a hallucinated/out-of-range index - proves
+        # the real code still anchors to a REAL known candidate (BM25
+        # rank 1) rather than fabricating an identity, even when the
+        # model's own index is garbage.
+        install_fake_groq(confidence=0.88, best_candidate=999)
         at.run()
         at.get_by_key("custom_terms_3").set_value("narcotic license excise commissioner")
         at.get_by_key("research_3").click()
@@ -202,7 +211,7 @@ def main() -> None:
         check("re-searched column's result updated (success=True)", result3.success is True)
         check("re-searched column's confidence updated to the mocked value", result3.confidence == 0.88)
         check(
-            "re-searched column's pdf_name/page are the REAL candidate's, not the model's hallucinated echo",
+            "re-searched column's pdf_name/page are a REAL candidate's (BM25 rank 1), never a hallucinated/out-of-range index's fabricated identity",
             result3.pdf_name == "CompanyA.pdf" and result3.page_number_or_range == "7",
         )
 

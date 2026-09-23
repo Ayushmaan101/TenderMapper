@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -44,21 +45,24 @@ def check(label: str, condition: bool) -> None:
 def install_fake_groq(call_log: list, column_to_marker: dict[str, str] | None = None, low_confidence: float = 0.1, high_confidence: float = 0.92):
     """A content-aware fake: inspects BOTH which column is being
     evaluated ("Requirement column: {name}", present verbatim in the
-    prompt) AND the candidate page text actually sent, returning
-    high_confidence only when that SPECIFIC column's own marker phrase
-    is present in that page's text - low_confidence otherwise.
+    prompt) AND which [Candidate N] block actually contains that
+    column's marker phrase, reporting that candidate's NUMBER as
+    best_candidate (batched design, Groq rate-limit fix) rather than
+    echoing a pdf_name/page string.
 
-    Scoping matters: a flat "does any known-good phrase appear anywhere"
-    check (this test's first draft) let a page relevant to one column
-    get wrongly counted as a strong match for a DIFFERENT column's query
-    too, since a small corpus puts every page in every column's
-    candidate pool. With confidence tied only to page content, multiple
-    candidates could spuriously score high for the same column, and
-    early-stopping would then pick whichever one's thread happened to
-    finish first - not necessarily the genuinely correct page. Tying the
-    match to (column, marker) pairs is what makes this a real,
-    per-column-discriminating simulation rather than a uniform
-    rubber-stamp.
+    Scoping matters: a flat "does any known-good phrase appear anywhere
+    in the prompt" check (an early draft of this fixture, from before
+    batching) let a page relevant to one column get wrongly counted as a
+    strong match for a DIFFERENT column's query too, since a small
+    corpus puts every page in every column's candidate pool - and
+    separately, the "Requirement text:" preamble can itself legitimately
+    contain the same words as a marker (e.g. a "WHO GMP" column's own
+    requirement text mentions "WHO GMP certificate"). Splitting on
+    "[Candidate N]" and searching only WITHIN each candidate's own block
+    excludes that preamble automatically (it's everything before the
+    first "[Candidate 1]"), so this fixture can't self-match on the
+    requirement text the way the original per-call design's fixture once
+    could (that non-determinism bug is documented in CHECKLIST.md 3.3).
     """
     import verify.groq_verifier as gv
 
@@ -68,25 +72,22 @@ def install_fake_groq(call_log: list, column_to_marker: dict[str, str] | None = 
         def create(self, **kwargs):
             call_log.append(kwargs)
             user_content = kwargs["messages"][1]["content"]
-            # The marker must appear in the PAGE TEXT specifically, not
-            # merely anywhere in the prompt - the "Requirement text:"
-            # section can itself legitimately contain the same words
-            # (e.g. a "WHO GMP" column's own requirement text mentions
-            # "WHO GMP certificate"), which would otherwise make every
-            # candidate for that column match regardless of which page
-            # it actually is. This was this test's own real bug: without
-            # scoping to the page-text section, ALL candidates for a
-            # column scored equally high, and early-stopping then just
-            # returned whichever one's thread happened to finish first -
-            # non-deterministic, caught by re-running the test 3 times.
-            page_text_section = user_content.split("Page text:\n", 1)[-1]
+
+            best_candidate = 0
             confidence = low_confidence
             for col_name, marker in column_to_marker.items():
-                if f"Requirement column: {col_name}" in user_content and marker in page_text_section:
-                    confidence = high_confidence
-                    break
+                if f"Requirement column: {col_name}" not in user_content:
+                    continue
+                blocks = re.split(r"\[Candidate (\d+)\]", user_content)
+                for i in range(1, len(blocks), 2):
+                    if marker in blocks[i + 1]:
+                        best_candidate = int(blocks[i])
+                        confidence = high_confidence
+                        break
+                break
+
             content = json.dumps({
-                "pdf_name": "MODEL-ECHO-IGNORED.pdf", "page_number_or_range": "999",
+                "best_candidate": best_candidate,
                 "confidence": confidence, "match_snippet": "matched evidence text", "reasoning": "evaluated",
             })
             message = type("M", (), {"content": content})()
@@ -153,7 +154,8 @@ def main() -> None:
         progress_calls: list = []
         results = resolve_all_columns(
             conn, corpus_index, page_texts, reference_index=None,
-            progress_callback=lambda done, total, name: progress_calls.append((done, total, name)),
+            progress_callback=lambda done, total, name, column_id, result: progress_calls.append((done, total, name)),
+            submit_delay=0.0,  # no real rate limit to respect against a mock - keep this test fast
         )
 
         check("resolution_results auto-populates for EVERY configured column (4 total, across 2 tables)", len(results) == 4)
@@ -162,7 +164,7 @@ def main() -> None:
         direct = results[col_direct_match]
         check("direct-match column -> high confidence (>= 0.70)", direct.confidence >= 0.70)
         check("direct-match column -> success=True", direct.success is True)
-        check("direct-match column -> pdf_name/page are the REAL candidate's, not the model's echoed 'MODEL-ECHO-IGNORED.pdf'", direct.pdf_name == "CompanyA.pdf" and direct.page_number_or_range == "1")
+        check("direct-match column -> pdf_name/page are the REAL candidate's, derived from the model's chosen candidate NUMBER, never a hallucinated identity", direct.pdf_name == "CompanyA.pdf" and direct.page_number_or_range == "1")
         check("direct-match column -> a clean, non-empty match_snippet", bool(direct.match_snippet))
         check("direct-match column's result is NOT flagged by checklist 4.2's is_flagged() (integration check)", not is_flagged(direct))
 
@@ -197,7 +199,7 @@ def main() -> None:
         empty_corpus = build_corpus_index([])
         call_log3: list = []
         install_fake_groq(call_log3)
-        results3 = resolve_all_columns(conn2, empty_corpus, {}, reference_index=None)
+        results3 = resolve_all_columns(conn2, empty_corpus, {}, reference_index=None, submit_delay=0.0)
 
         check("empty corpus -> every column still gets an entry (2 of 2)", len(results3) == 2)
         check("empty corpus -> both entries are the unresolved placeholder (success=False)", all(not r.success for r in results3.values()))

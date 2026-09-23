@@ -1,9 +1,11 @@
-"""Checklist 3.2 verification — one real Groq call pair (no mocking).
+"""Checklist 3.2 verification — one real Groq call (no mocking), rewritten
+for the batched single-call-per-column design (Groq rate-limit fix).
 
-Confirms the JSON schema actually parses from a genuine model response
-(not just from hand-crafted mock JSON) and that the verification prompt
-does what it's for: discriminating a genuine compliance match from a
-page that only mentions the requirement's subject in passing, on real
+Confirms the batched JSON schema actually parses from a genuine model
+response (not just from hand-crafted mock JSON) and that the batched
+verification prompt does what it's for: discriminating a genuine
+compliance match from a page that only mentions the requirement's
+subject in passing, WHEN BOTH ARE SENT IN THE SAME SINGLE CALL - on real
 page content built from the actual seed schema's WHO-GMP requirement
 text (seed/seed_data.py Item 4).
 
@@ -20,7 +22,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from search.bm25_index import SearchCandidate  # noqa: E402
 from seed.seed_data import TABLE_1_ITEMS  # noqa: E402
-from verify.groq_verifier import verify_candidate  # noqa: E402
+from verify.groq_verifier import verify_candidates_batch  # noqa: E402
 
 checks: list[tuple[str, bool]] = []
 
@@ -50,31 +52,42 @@ def main() -> None:
         "general eligibility criteria and submission timelines."
     )
 
-    candidate = SearchCandidate(
+    candidate_genuine = SearchCandidate(
         pdf_name="CompanyA.pdf", page_number=5, rank=1, score=3.2,
         snippet="WHO GMP certificate excerpt", matched_terms=["who", "gmp"], match_signals=["bm25"],
     )
-
-    print("Calling Groq live for the genuine WHO-GMP match...")
-    genuine_result = verify_candidate(column_name, requirement_text, candidate, genuine_page)
-    check("live call succeeds (JSON schema parses)", genuine_result.success is True)
-    check(f"genuine match scores high confidence (got {genuine_result.confidence})", genuine_result.confidence >= 0.7)
-    check("genuine match's snippet/reasoning are non-empty", bool(genuine_result.match_snippet) and bool(genuine_result.reasoning))
-    check(
-        "genuine match's pdf_name/page are exactly our candidate's, not re-derived from the model",
-        genuine_result.pdf_name == "CompanyA.pdf" and genuine_result.page_number_or_range == "5",
+    candidate_irrelevant = SearchCandidate(
+        pdf_name="CompanyA.pdf", page_number=9, rank=2, score=1.1,
+        snippet="passing mention of WHO GMP", matched_terms=["who", "gmp"], match_signals=["bm25"],
     )
-    print(f"  confidence={genuine_result.confidence}  reasoning={genuine_result.reasoning}")
 
-    print("\nCalling Groq live for the passing-mention false positive...")
-    fp_result = verify_candidate(column_name, requirement_text, candidate, irrelevant_page)
-    check("live call succeeds (JSON schema parses)", fp_result.success is True)
-    check(f"passing-mention candidate scores low confidence (got {fp_result.confidence})", fp_result.confidence <= 0.4)
-    print(f"  confidence={fp_result.confidence}  reasoning={fp_result.reasoning}")
+    page_texts = {
+        ("CompanyA.pdf", 5): genuine_page,
+        ("CompanyA.pdf", 9): irrelevant_page,
+    }
+
+    print("Calling Groq live: ONE batched call with both the genuine match and the passing-mention false positive...")
+    result = verify_candidates_batch(column_name, requirement_text, [candidate_genuine, candidate_irrelevant], page_texts)
+
+    check("live batched call succeeds (JSON schema parses)", result.success is True)
+    check(f"the genuine candidate is correctly picked as the winner (got page {result.page_number_or_range})", result.page_number_or_range == "5")
+    check(f"the winning result scores high confidence (got {result.confidence})", result.confidence >= 0.7)
+    check("the winning result's snippet/reasoning are non-empty", bool(result.match_snippet) and bool(result.reasoning))
+    check(
+        "the winning result's pdf_name/page are exactly the genuine candidate's, not re-derived from the model",
+        result.pdf_name == "CompanyA.pdf" and result.page_number_or_range == "5",
+    )
+    print(f"  confidence={result.confidence}  reasoning={result.reasoning}")
+
+    print("\nCalling Groq live: ONE batched call with ONLY the passing-mention false positive...")
+    fp_only_result = verify_candidates_batch(column_name, requirement_text, [candidate_irrelevant], {("CompanyA.pdf", 9): irrelevant_page})
+    check("live batched call (single false-positive candidate) succeeds (JSON schema parses)", fp_only_result.success is True)
+    check(f"a passing-mention-only pool scores low confidence (got {fp_only_result.confidence})", fp_only_result.confidence <= 0.4)
+    print(f"  confidence={fp_only_result.confidence}  reasoning={fp_only_result.reasoning}")
 
     check(
-        "the prompt discriminates correctly: genuine match clearly outscores the passing mention",
-        genuine_result.confidence > fp_result.confidence,
+        "the prompt discriminates correctly even within one batched call: genuine match clearly outscores the passing-mention-only pool",
+        result.confidence > fp_only_result.confidence,
     )
 
     if all(ok for _, ok in checks):

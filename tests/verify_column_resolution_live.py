@@ -74,7 +74,7 @@ def main() -> None:
         progress_seen = []
         results = resolve_all_columns(
             conn, corpus_index, page_texts, reference_index=None,
-            progress_callback=lambda done, total, name: progress_seen.append((done, total, name)),
+            progress_callback=lambda done, total, name, column_id, result: progress_seen.append((done, total, name)),
         )
 
         check("resolution_results has an entry for all 10 real seeded columns", len(results) == 10)

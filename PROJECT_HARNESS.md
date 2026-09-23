@@ -57,7 +57,7 @@ See §6 (Explicit Non-Goals) for the full list.
 | Search / retrieval | **BM25 (`rank_bm25`)** over extracted+OCR'd page text | |
 | Fuzzy term matching | **`rapidfuzz`** | Handles term variants / OCR noise |
 | Synonym expansion | **Groq (`openai/gpt-oss-120b`), one-time at config-time** | See §4. Model substituted from the originally-planned Llama 3.3 70B — see §9 Change Log, 2026-09-21. |
-| Verification / rerank | **Groq (`openai/gpt-oss-120b`)** | Structured JSON output (`pdf_name, page_number_or_range, confidence, match_snippet, reasoning`). See §3 step 7. Model substituted from the originally-planned Llama 3.3 70B for the same reason as synonym expansion (§9, checklist 1.4) — kept consistent across both Groq call sites per explicit approval, checklist 3.2. |
+| Verification / rerank | **Groq (`openai/gpt-oss-120b`), ONE batched call per column** | Structured JSON output (`best_candidate, confidence, match_snippet, reasoning`) — rewritten (Groq rate-limit fix, 2026-09-23) so every BM25 candidate for a column is evaluated in a single call rather than one call per candidate; `best_candidate` is a validated index into the candidates WE sent, never a free-text identity echo. See §3 step 7. Model substituted from the originally-planned Llama 3.3 70B for the same reason as synonym expansion (§9, checklist 1.4) — kept consistent across both Groq call sites per explicit approval, checklist 3.2. |
 | Config storage | **SQLite** | User-scoped, persists across runs and restarts |
 | Results editing | **`st.data_editor`** | Reviewer can correct flagged/wrong cells |
 | Export | **Excel via `openpyxl`** | Matches the configured schema |
@@ -155,13 +155,23 @@ lookup**, not the main path — it catches pages that reference a requirement by
 number only, with none of the requirement's vocabulary present.
 
 **6. BM25 + synonym-aware search.** Query = the column's requirement text terms **plus its
-stored synonyms** (see §4). `rapidfuzz` handles term variants and OCR noise. Returns a
-**wide candidate pool: top 15–20 candidate pages per schema row** — deliberately wide,
-not top-5, because verification happens downstream.
+stored synonyms** (see §4). `rapidfuzz` handles term variants and OCR noise. `search()`
+itself still supports a wide pool (`DEFAULT_POOL_SIZE = 20`, used as-is by manual
+re-search, checklist 4.2) — but the **automated per-column resolution loop**
+(`run/pipeline_runner.py::resolve_all_columns`, checklist 3.3) narrows this to
+**`TOP_K_CANDIDATES = 5` candidate pages per schema row** before they ever reach Groq
+(Groq rate-limit fix, 2026-09-23): five already-strong BM25 matches is enough for the
+verification step below to discriminate among, and keeps each batched prompt/call a
+bounded, predictable size and cost.
 
-**7. Groq verification / rerank.** Groq (Llama 3.3 70B) reads each candidate page's text
-alongside the schema row's requirement text and returns structured JSON:
-`{pdf_name, page_number_or_range, confidence (0-1), match_snippet}`.
+**7. Groq verification / rerank.** Groq (`openai/gpt-oss-120b`) reads **all of a column's
+candidate pages in ONE call** — not one call per candidate (Groq rate-limit fix,
+2026-09-23, replacing the original per-candidate design) — alongside the schema row's
+requirement text, and returns structured JSON:
+`{best_candidate (1-N, or 0 for "none match"), confidence (0-1), match_snippet, reasoning}`.
+`best_candidate` is only ever used to INDEX back into the candidates already sent —
+never trusted as a free-text pdf_name/page identity — so this guarantees **exactly one
+Groq API call per column**, regardless of how many candidates that column has.
 
 This functions as retrieve-then-rerank, but it does **verification and extraction** too,
 not just scoring.
@@ -324,6 +334,14 @@ Distinct from the Config tab.
    **read-only in the run tab** — it can only be changed from the Config tab.
 2. **Company input.** User enters a company name and uploads that company's documents. Accept
    **a zip, a folder, or multiple separate PDF files — all three input modes.**
+
+   **Granular ingest progress (2026-09-23):** while phase 1 (ingest → OCR → search-index) runs,
+   `run/run_button.py` shows a live "Processing document X of Y (filename.pdf) — Extracting
+   text..." counter (`document_progress_callback`, new on `run/pipeline_runner.py::
+   run_ocr_and_build_index`, fires once per document before its pages start) via `st.empty()`,
+   plus the existing per-page progress bar for whichever document is currently running — so a
+   reviewer watching a multi-document upload can tell both which document is active and how far
+   through its pages the app is.
 3. **Resolve.** For **every column in every configured table** — not just the two named tables;
    this must generalize to however many tables/columns the user has configured — run the full
    pipeline (text-layer check → OCR if needed → BM25 + synonym search → Groq verification) to
@@ -333,20 +351,29 @@ Distinct from the Config tab.
    **Status:** a "▶️ Run Mapping" button (checklist 5.1, `run/run_button.py` +
    `run/pipeline_runner.py`) does the ingest → text-layer-check → OCR → search-index portion of
    this today, with per-document error isolation, and populates `corpus_index`/`page_texts`/
-   `reference_index`. **Checklist 3.3 (complete):** the same button then runs the actual
-   per-column loop — `run/pipeline_runner.py::resolve_all_columns` iterates every column in every
-   configured table (across all tables, not just the two named ones), BM25-searches the indexed
-   corpus with that column's requirement text + stored synonyms, passes the top 15–20 candidates
-   to `verify/groq_verifier.py::resolve_column` (bounded workers, early-stopping at confidence ≥
-   0.90), and writes the top verified result per column straight into
-   `st.session_state["resolution_results"]` — fully replacing any prior run's results each time
-   (no attempt to merge with earlier manual edits; see checklist 4.4's note on why
-   `VerificationResult.success` can't distinguish a human edit from a stale auto-result). A second
-   `st.progress` bar reports live status per column as it resolves. Columns with no BM25 candidates
-   at all resolve to a `success=False` placeholder rather than skipping silently. Genuinely
-   unmatched columns still land low/zero-confidence and get picked up by checklist 4.2's
-   `is_flagged()` exactly as before — the difference is they're now populated automatically on
-   every run instead of only via manual re-search or direct grid edits.
+   `reference_index`. **Checklist 3.3 (complete), rewritten 2026-09-23 for the Groq rate-limit
+   fix:** the same button then runs the actual per-column loop —
+   `run/pipeline_runner.py::resolve_all_columns` iterates every column in every configured table,
+   BM25-searches the indexed corpus with that column's requirement text + stored synonyms
+   (capped to **`TOP_K_CANDIDATES = 5`** candidates, down from the earlier wide 15–20 pool — see
+   §3 step 6), and passes all of them to `verify/groq_verifier.py::resolve_column` in **one
+   batched Groq call per column** (down from one call per candidate — see §3 step 7), writing the
+   verified result per column straight into `st.session_state["resolution_results"]` — fully
+   replacing any prior run's results each time (no attempt to merge with earlier manual edits;
+   see checklist 4.4's note on why `VerificationResult.success` can't distinguish a human edit
+   from a stale auto-result). Columns with no BM25 candidates at all resolve to a `success=False`
+   placeholder rather than skipping silently. Genuinely unmatched columns still land
+   low/zero-confidence and get picked up by checklist 4.2's `is_flagged()` exactly as before — the
+   difference is they're now populated automatically on every run instead of only via manual
+   re-search or direct grid edits.
+
+   **Concurrency (Groq rate-limit fix):** since each column now costs exactly one Groq call, BM25
+   search runs sequentially up front (it reads the shared `conn`, which is not safe for
+   concurrent multi-thread access even with `check_same_thread=False`), and only the Groq calls
+   themselves run through a small bounded `ThreadPoolExecutor` **across columns**
+   (`COLUMN_MAX_WORKERS = 3`), with a `COLUMN_SUBMIT_DELAY_SECONDS = 1.0` stagger between each
+   submission so ~20+ columns don't all fire through the pool at once. Both constants are resolved
+   fresh per call (not baked into function defaults) so tests can monkeypatch them for speed.
 4. **Render.** Once all columns across all tables are resolved, render the results as an
    **editable table per configured table** (`st.data_editor`). Layout must hold up regardless of
    how many tables/columns/rows are configured.
@@ -358,6 +385,19 @@ Distinct from the Config tab.
    regardless of how that table looked in the original document, and mimicking either original
    layout in the UI would require per-table hardcoding. One grid row per schema_column is the
    only representation that stays correct for an arbitrary, freely reconfigured schema.
+
+   **Real-time streaming (Groq rate-limit fix, 2026-09-23):** the resolution phase no longer
+   blocks silently until every column finishes. `run/run_button.py` renders an `st.empty()`
+   placeholder holding a read-only preview (`run/results.py::build_live_preview_dataframe` — all
+   tables combined into one table, every configured column shown from the start with a blank/
+   pending row until it resolves) and re-renders it every time `resolve_all_columns()`'s
+   `progress_callback` fires — which now happens **in completion order**, as each column's single
+   batched Groq call actually finishes (columns run concurrently, see §5 step 3's "Concurrency"
+   note), not in configured order. Rows visibly fill in live rather than the whole grid appearing
+   only once every column is done. The placeholder is emptied once the run finishes, and the
+   script continues straight on to this section's real, editable `st.data_editor` — the "swap to
+   the interactive grid" is just the natural next step of the same script run, not a separate
+   rerun or an extra click.
 
    **Run-completion gate (Run tab UI lifecycle refinement, 2026-09-23):** the results grid,
    summary metrics, manual re-search controls, and the Excel export button are all hidden until
@@ -580,3 +620,4 @@ genuinely has no `.streamlit/secrets.toml` on disk.
 | 2026-09-23 | Checklist 5.2: new `packages.txt` (`tesseract-ocr` + headless graphics libs for `opencv`/PaddleOCR on Debian). `ocr/pipeline.py` gained cross-platform `_resolve_tesseract_cmd()` (`TESSERACT_CMD` → `shutil.which` → Windows default) — the only hardcoded OS-specific path in the source tree. New `run/secrets_bootstrap.py::bootstrap_groq_api_key()` bridges Streamlit Community Cloud's `st.secrets` into `os.environ` at `app.py` startup, only when `GROQ_API_KEY` isn't already set, keeping `config/synonyms.py`/`verify/groq_verifier.py` Streamlit-free and unchanged. New `.streamlit/secrets.toml.example`; the real `.streamlit/secrets.toml` was already `.gitignore`'d. Added this §8/§9 Deployment section documenting the deploy steps and two flagged-not-solved risks (PaddleOCR's memory footprint against Community Cloud's free tier is unverified without a real deployment; the config DB isn't persistent storage there — ephemeral container filesystem). Two new suites (`verify_deployment_config_unit.py` 7/7, `verify_deployment_config_ui.py` 3/3). Full regression (18 top-level suites) and a production-DB sanity boot both passed clean. | Yes — checklist 5.2 |
 | 2026-09-23 | Run tab UI lifecycle refinement (user-directed, post-checklist polish, not a numbered checklist item at request time — folded into Phase 5 as 5.3): a fresh boot or a post-"Next Company" screen used to render every row as ⚠️ Flagged (0.00) plus one "Search again" expander per flagged column, stacking dozens of expanders down the screen. New `run/results.py::HAS_RUN_KEY`/`is_mapping_complete()` gate the results grid, summary metrics, manual re-search controls, and the export button behind `st.session_state["mapping_has_run"]` — `app.py` shows one placeholder callout instead when it's false; `run/run_button.py` sets it true only once `resolve_all_columns()` actually produces results; `reset_run_state()` (checklist 4.3) clears it back to `False`. §5 step 4 updated with the gate's design. Manual re-search (checklist 4.2) consolidated from one `st.expander` per flagged row into a single `⚠️ Manual Re-Search: Review Flagged Items (N flagged)` expander with an `st.selectbox` (options prefixed `❗`, e.g. `❗ Item 4: WHO GMP/GMA Certificate (Confidence: 0.00)` — the short label is the part of `requirement_text` before its em dash when present, else a truncated prefix) driving which single column's search box/button render. Six existing UI suites needed rework for the new gate/consolidation (`verify_results_ui.py`, `verify_manual_research_ui.py`, `verify_error_handling_ui.py`, `verify_excel_export_ui.py`, `verify_next_company_reset.py`) — each now either simulates a completed run by setting `mapping_has_run` directly (suites that intentionally bypass the real OCR/Groq pipeline) or already went through the real "Run Mapping" button; `verify_next_company_reset.py` and `verify_results_ui.py` gained explicit cold-start/post-reset "everything is hidden" assertions. Full regression (18 top-level suites) and a production-DB sanity boot both passed clean. | Yes — user-directed |
 | 2026-09-23 | Cloud OCR performance adjustments (user-directed, same session as the Run tab UI lifecycle refinement — folded into Phase 5 as part of 5.3): `ocr/pipeline.py::_get_paddle_ocr()`'s `enable_mkldnn` is now `sys.platform == "linux"`-gated (off on this Windows dev box, where it's required to avoid a real PP-OCRv6/oneDNN crash confirmed in checklist 2.3; on for Community Cloud's CPU vectorization) — **directed, unverified against a real Linux box**, flagged in §8's open-risks note and §7's `paddleocr` row. New `ocr/pipeline.py::choose_engine_order(needs_ocr_count)` + `HEAVY_LOAD_THRESHOLD = 15`: `resolve_pdf_text()` counts each PDF's `needs_ocr` pages (checklist 2.2) once, up front, and routes the whole document through Tesseract-primary/PaddleOCR-fallback above the threshold, PaddleOCR-primary/Tesseract-fallback at or under it — a per-document decision, not per-page. `ocr_page()`'s signature grew `primary_engine`/`fallback_engine` params (defaulting to the original PaddleOCR-primary order, so every existing direct call/test is unaffected); its internal engine lookup was changed from a fixed dict built at import time to a small `_engine_func(name)` resolver that re-reads the module-level `_ocr_with_paddle`/`_ocr_with_tesseract` names on every call, specifically so the established test pattern of monkeypatching those two names directly keeps working unchanged. §3 step 3 and §8's open-risks note updated with the routing design. Four new tests in `verify_ocr_pipeline.py` (`choose_engine_order` at/below/above the threshold; light-load and heavy-load PDFs routing end-to-end through `resolve_pdf_text`; heavy-load-with-failing-Tesseract still falling back to PaddleOCR, proving the swap demotes rather than drops it) — suite now 44/44. Full regression (18 top-level suites) and a production-DB sanity boot both passed clean. | Yes — user-directed |
+| 2026-09-23 | Groq API rate-limit fix + real-time streaming (user-directed, deployed-to-Community-Cloud follow-up): hundreds of per-candidate Groq calls per run both blocked the UI until the whole resolution loop finished and burned through free-tier rate limits. **`verify/groq_verifier.py` rewritten**: `verify_candidates_batch()` replaces the old per-candidate `verify_candidate`/`verify_candidates` pair entirely — every candidate for a column goes into ONE prompt (`[Candidate 1]`, `[Candidate 2]`, ...), and the model returns `{best_candidate (1-N or 0), confidence, match_snippet, reasoning}`; `best_candidate` is only ever used to index back into the real candidate list (never trusted as a free-text identity), generalizing checklist 3.2's original "never trust the model's echo" principle to batching. **Real prompt bug found and fixed via the live test**: the model conflated "confidence in my own reasoning" with "confidence the requirement is satisfied" — on a single-candidate non-match, it correctly reasoned "does not satisfy the requirement" in its own `reasoning` field but still returned `confidence: 0.96`. Fixed by rewording the schema's confidence description to explicitly state confidence reflects match STRENGTH, not certainty-of-judgment, and that `best_candidate=0` must pair with low (0.0-0.4) confidence; confirmed fixed by re-running the same live scenario (0.96 → 0.1, correctly). §2 and §3 steps 6-7 updated. **`run/pipeline_runner.py::resolve_all_columns` rewritten**: BM25 search is capped to `TOP_K_CANDIDATES = 5` and now runs sequentially up front for every column (reads the shared sqlite3 `conn`, unsafe for concurrent multi-thread access even with `check_same_thread=False` — a risk caught and designed around before writing any concurrent code, not after); only the Groq calls run through a bounded `ThreadPoolExecutor` **across columns** (`COLUMN_MAX_WORKERS = 3`, `COLUMN_SUBMIT_DELAY_SECONDS = 1.0` stagger between submissions), both resolved fresh per call (not baked into function defaults) so tests can monkeypatch them for speed — the same pattern checklist 5.3's `ocr/pipeline.py::_engine_func()` already established. `progress_callback` gained `column_id`/`result` params and now fires in **completion order**, enabling the streaming UI below. `run_ocr_and_build_index` gained a separate `document_progress_callback` (fires once per document, before its pages start) for the new "Processing document X of Y" counter. **`run/run_button.py` rewritten**: phase 1 shows a live document counter (`st.empty()` + the existing per-page bar); phase 2 renders `run/results.py::build_live_preview_dataframe()` (new — all tables combined, every configured column shown from the start with blank/pending rows) into an `st.empty()` placeholder, re-rendered on every `progress_callback` firing so rows fill in live; both placeholders are emptied once the run finishes and the script falls through naturally into the real interactive `st.data_editor` (no separate rerun needed). **Verification**: `verify_groq_verifier_unit.py` rewritten (28/28) around the batched API, including an explicit "evaluating 5 candidates costs exactly ONE Groq call" assertion and an out-of-range-index-can't-escape-the-real-candidate-list test; `verify_groq_verifier_live.py` rewritten to send a genuine WHO-GMP match and a passing-mention false positive in the SAME batched call and confirm the real model discriminates correctly (this is what caught the confidence-semantics bug above). `verify_column_resolution_ui.py` (through the real "Run Mapping" button, real OCR) gained the literal **"a 23-column run makes EXACTLY 23 Groq API calls" terminal-log assertion** the checklist itself asked for, plus assertions that no live-preview placeholder content leaks into the final rendered tree. `verify_column_resolution_unit.py`, `verify_manual_research_ui.py`, `verify_error_handling_unit.py`/`_ui.py` updated for the new response schema and `progress_callback` signature; `verify_error_handling_unit.py` gained a direct unit test for `document_progress_callback`'s call order/content. Full regression (18 top-level suites) and a production-DB sanity boot both passed clean; the two live-only Groq suites were intermittently rate-limited by this session's own heavy testing volume at various points while this work was done — confirmed via isolated diagnostic calls to be genuine, transient account-level 429s (the resilience contract degraded gracefully every time, never crashed), not a code defect. | Yes — user-directed |

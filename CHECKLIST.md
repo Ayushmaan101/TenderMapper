@@ -864,3 +864,97 @@ including the two pre-existing real-engine tests (real PaddleOCR success, real T
 fallback) confirmed still passing on this Windows box with the new platform-gated `enable_mkldnn`
 logic in place. **Full regression suite (18 top-level test files) passes clean; also confirmed
 against the real production DB.***
+
+### [x] 5.4 — Groq API rate-limit fix, granular ingest progress & real-time streaming
+User-directed, post-deployment refinement (not part of the original numbered checklist; folded
+into Phase 5). Live on Community Cloud, the app made hundreds of Groq calls per run (one per
+BM25 candidate) and blocked the UI until the entire resolution loop finished — slow, and it
+burned through the free tier's rate limits.
+✅ *Done 2026-09-23 — **Batched Groq verification**: `verify/groq_verifier.py` rewritten from the
+ground up. `verify_candidates_batch()` puts every candidate's text into ONE prompt
+(`[Candidate 1]`, `[Candidate 2]`, ...) and asks the model for a single JSON payload:
+`{best_candidate (1-N, or 0 for "none match"), confidence, match_snippet, reasoning}`.
+`best_candidate` is only ever used to index back into the real candidate list already held with
+certainty — the model can steer WHICH known candidate wins and how confident the result is, but
+can never fabricate a pdf_name/page identity, generalizing checklist 3.2's original "never trust
+the model's echo" principle from an implicit single candidate to an explicit numbered set. This
+guarantees exactly ONE Groq API call per column regardless of candidate count. Old
+`verify_candidate`/`verify_candidates` (per-candidate, thread-pool-within-a-column) removed
+entirely; `resolve_column()` kept its exact public signature so `run/pipeline_runner.py` and
+`run/results.py`'s manual re-search needed no call-site changes beyond the internals.
+**Real bug found and fixed via the live test** (not caught by mocks, since mocks don't have real
+model judgment to get wrong): on a single-candidate pool that genuinely does NOT satisfy the
+requirement, the model's own `reasoning` correctly said "does not satisfy the requirement" — but
+it returned `confidence: 0.96` anyway, conflating "how sure am I about my own judgment" with "how
+strongly does the evidence show a match." Fixed by rewording the JSON schema's confidence
+description to state explicitly that confidence reflects match STRENGTH, not judgment certainty,
+and that `best_candidate=0` must pair with low (0.0-0.4) confidence. Re-ran the identical live
+scenario after the fix: confidence dropped from 0.96 to 0.1, correctly. This is exactly the kind
+of thing a live call against the real model catches that a hand-written mock JSON response never
+would.
+**Candidate cap + concurrency**: `run/pipeline_runner.py::resolve_all_columns` now caps BM25
+retrieval to `TOP_K_CANDIDATES = 5` per column (down from the wide 15-20 pool) before candidates
+ever reach Groq. BM25 search itself (which reads the shared sqlite3 `conn` via
+`crud.get_synonyms`) runs sequentially, up front, for every column on the calling thread — a
+single `sqlite3.Connection` is not safe for concurrent multi-thread queries even with
+`check_same_thread=False` (see `db/connection.py`), a risk identified and designed around
+*before* writing any concurrent code, not discovered after. Only the Groq calls themselves - the
+slow, rate-limited step, and the only step that no longer touches `conn` once candidates are in
+hand - run through a small bounded `ThreadPoolExecutor` **across columns**
+(`COLUMN_MAX_WORKERS = 3`, a `COLUMN_SUBMIT_DELAY_SECONDS = 1.0` stagger between each submission).
+Both constants are resolved fresh from the module on every call rather than baked into literal
+parameter defaults, specifically so tests can monkeypatch them to run fast — the same pattern
+`ocr/pipeline.py::_engine_func()` already established for the same reason (checklist 5.3).
+Results are collected via `as_completed()`, so `progress_callback` (now carrying `column_id` and
+the `VerificationResult` itself, not just `done/total/name`) fires in **completion order**, not
+configured order — this is what makes the live streaming UI below genuinely live.
+**Granular ingest progress**: `run_ocr_and_build_index` gained a `document_progress_callback`
+(fires once per document, before its pages start processing, as `(doc_index, doc_total,
+pdf_name)`) - separate from the existing per-page callback, which only ever tracked progress
+within whichever document is currently running. `run/run_button.py` renders both into the UI: a
+document counter line ("Processing document X of Y (filename.pdf) — Extracting text...") via
+`st.empty()`, above the existing per-page progress bar.
+**Real-time streaming**: new `run/results.py::build_live_preview_dataframe()` — every configured
+column across every table, combined into one read-only table with a "Table" column, showing a
+blank/pending row for anything not yet resolved (rows fill in, they don't appear/disappear).
+`run/run_button.py` renders it into an `st.empty()` placeholder inside the `progress_callback`,
+so it re-renders every time a column's single Groq call completes — a reviewer watches rows
+populate live instead of the whole grid appearing only once everything is done. Both the live
+table and the document/page progress placeholders are emptied once the run finishes; the script
+then falls straight through to `render_results_section()`'s real, editable `st.data_editor` later
+in the same script pass — the "swap to interactive" is just the next step of one script run, not
+a separate rerun, so there's no widget-focus-resetting extra interaction in between.
+**OCR fast-path (confirmed, no code change needed)**: audited `ocr/text_check.py` and
+`ocr/pipeline.py::resolve_pdf_text` — `has_usable_text` pages already resolve as `engine="native"`
+unconditionally, with neither PaddleOCR nor Tesseract ever invoked, regardless of whether the
+page also carries an embedded image. This was already strictly enforced since checklist 2.2/2.3;
+re-confirmed via `verify_ocr_pipeline.py`'s existing "OCR engines never invoked" assertions
+rather than assumed.
+**Verification**: `verify_groq_verifier_unit.py` rewritten around the batched API (28/28) -
+including an explicit "evaluating 5 candidates costs exactly ONE Groq call" assertion, an
+out-of-range/hallucinated-index-can't-escape-the-real-candidate-list test, and the full
+resilience-contract suite (missing key, network drop, malformed JSON, 429-retry-with-backoff)
+re-proven against the new single-call shape. `verify_groq_verifier_live.py` rewritten to send a
+genuine WHO-GMP match and a passing-mention false positive in the SAME batched call (this is the
+test that caught the confidence-semantics bug above). `verify_column_resolution_ui.py` (through
+the real "Run Mapping" button, real OCR, real submission stagger) gained the literal
+**"a 23-column run makes EXACTLY 23 Groq API calls" terminal-log assertion** this checklist item
+asked for, plus assertions that no live-preview-table or document-counter content leaks into the
+final rendered tree after the run completes. `verify_column_resolution_unit.py`,
+`verify_manual_research_ui.py`, `verify_error_handling_unit.py`/`_ui.py` updated for the new
+response schema and the `progress_callback` signature change; `verify_error_handling_unit.py`
+gained a direct unit test for `document_progress_callback`'s call order/count/content across a
+5-document batch including documents that go on to fail. AppTest cannot observe a script's
+mid-execution incremental renders (only the tree after the whole script finishes), so the "rows
+visibly populate live" claim itself rests on: (a) the same `st.empty()` + repeated-call pattern
+this codebase already used successfully for `ocr_progress`/`resolve_progress`, (b) the
+`progress_callback` firing in genuine completion order with correctly-accumulating partial state
+(unit-tested), and (c) confirmation that the placeholders are cleanly torn down with nothing
+leaked into the final state (AppTest-tested) - not a direct browser observation of the live
+update itself, which this environment has no tool to drive. **Full regression suite (18
+top-level test files) passes clean; also confirmed against the real production DB.** The two
+live-only Groq suites (`verify_groq_verifier_live.py`, `verify_column_resolution_live.py`) were
+intermittently rate-limited by this session's own heavy live-testing volume at various points
+while this work was done, confirmed via isolated diagnostic calls to be genuine transient
+account-level 429s, not a code defect - the resilience contract degraded gracefully every single
+time (retried, then flagged for human review) and never crashed.*

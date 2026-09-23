@@ -100,6 +100,18 @@ sqlite3.Connection, and never calls anything that writes to the config
 DB. It only reads column.id/column.name/column.requirement_text (already
 fetched, read-only, by the caller) and writes into the session-scoped
 results_store dict. Verified directly via a DB fingerprint before/after.
+
+Real-time streaming (Groq rate-limit fix / live feedback loop)
+------------------------------------------------------------------
+build_live_preview_dataframe() is a read-only, all-tables-combined
+counterpart to this module's per-table st.data_editor, built for
+run/run_button.py to render into an st.empty() placeholder DURING the
+resolution phase - as run/pipeline_runner.py::resolve_all_columns()
+completes each column's single batched Groq call, the caller re-renders
+this placeholder so rows fill in live instead of the whole grid
+appearing only once every column is done. It shares _build_result_rows()
+with render_results_section() so the live preview and the final
+interactive grid look identical apart from editability.
 """
 from __future__ import annotations
 
@@ -157,6 +169,56 @@ def reset_run_state() -> None:
     st.session_state[HAS_RUN_KEY] = False
 
 
+def _build_result_rows(columns: list[SchemaColumn], results_store: dict[int, VerificationResult]) -> list[dict]:
+    """The row shape shared by the final interactive grid
+    (render_results_section) and the read-only live-preview table
+    (build_live_preview_dataframe) - kept in one place so both stay
+    visually consistent (same Status labels, same columns).
+    """
+    rows = []
+    for col in columns:
+        result = results_store.get(col.id, _BLANK_RESULT)
+        rows.append({
+            "_column_id": col.id,
+            "Status": "⚠️ Flagged" if is_flagged(result) else "✅ Resolved",
+            "Column": col.name,
+            "Requirement": col.requirement_text,
+            "PDF Name": result.pdf_name,
+            "Page Number / Range": result.page_number_or_range,
+            "Confidence": result.confidence,
+            "Match Snippet": result.match_snippet,
+        })
+    return rows
+
+
+def build_live_preview_dataframe(conn: sqlite3.Connection, results_store: dict[int, VerificationResult]) -> pd.DataFrame:
+    """A read-only preview of every configured column's CURRENT
+    resolution state, across all tables combined into one table (with a
+    "Table" column) - used by run/run_button.py during the resolution
+    phase (real-time streaming, Run tab UI lifecycle refinement) so a
+    reviewer watches rows populate live as each column's single Groq
+    call completes, before the final per-table interactive
+    st.data_editor (render_results_section) takes over. Every configured
+    column appears from the start, showing the blank/pending placeholder
+    until its entry lands in results_store - rows fill in, they don't
+    appear/disappear.
+    """
+    tables = crud.get_tables(conn)
+    rows = []
+    for table in tables:
+        columns = crud.get_columns(conn, table.id)
+        for row in _build_result_rows(columns, results_store):
+            row = dict(row)
+            row["Table"] = table.name
+            rows.append(row)
+
+    columns_order = ["Table", "Status", "Column", "Requirement", "PDF Name", "Page Number / Range", "Confidence", "Match Snippet"]
+    if not rows:
+        return pd.DataFrame(columns=columns_order)
+    df = pd.DataFrame(rows).set_index("_column_id")
+    return df[columns_order]
+
+
 def render_results_section(conn: sqlite3.Connection) -> None:
     tables = crud.get_tables(conn)
     if not tables:
@@ -181,20 +243,7 @@ def render_results_section(conn: sqlite3.Connection) -> None:
 
         _render_table_summary(columns, results_store)
 
-        rows = []
-        for col in columns:
-            result = results_store.get(col.id, _BLANK_RESULT)
-            rows.append({
-                "_column_id": col.id,
-                "Status": "⚠️ Flagged" if is_flagged(result) else "✅ Resolved",
-                "Column": col.name,
-                "Requirement": col.requirement_text,
-                "PDF Name": result.pdf_name,
-                "Page Number / Range": result.page_number_or_range,
-                "Confidence": result.confidence,
-                "Match Snippet": result.match_snippet,
-            })
-
+        rows = _build_result_rows(columns, results_store)
         df = pd.DataFrame(rows).set_index("_column_id")
 
         edited_df = st.data_editor(
