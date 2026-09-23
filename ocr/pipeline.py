@@ -7,13 +7,20 @@ Environment quirks found and worked around, both required for PaddleOCR
 to run at all in this project's dev environment (paddlepaddle 3.3.1,
 CPU, Windows) - not just test-time conveniences:
 
-  - enable_mkldnn=False: with oneDNN acceleration on, the PP-OCRv6
-    detection model crashes on every call with a Paddle-internal error
+  - enable_mkldnn: on Windows, oneDNN acceleration crashes the PP-OCRv6
+    detection model on every call with a Paddle-internal error
     ("ConvertPirAttribute2RuntimeAttribute not support
     [pir::ArrayAttribute<pir::DoubleAttribute>]"), a PIR/oneDNN
-    incompatibility in this paddlepaddle build, not anything in this
-    project's code. Disabling oneDNN avoids the broken code path
-    entirely; CPU inference still works, just without that acceleration.
+    incompatibility in this paddlepaddle build on this platform, not
+    anything in this project's code - so it stays off there. On Linux
+    (Streamlit Community Cloud's `packages.txt` container - checklist
+    5.2), oneDNN is enabled instead, to take advantage of CPU
+    vectorization for faster inference under the platform's resource
+    ceiling. This is a directed, platform-gated change
+    (`sys.platform == "linux"`) that has not been verified against a
+    real Linux box in this environment - if the same crash turns out to
+    reproduce on Linux too, this needs to flip back to unconditionally
+    off, not silently left as-is.
   - use_doc_orientation_classify=False, use_doc_unwarping=False: these
     two preprocessing models are meant to correct real photographed-
     document distortion (skew, page warp) - genuinely useful for a
@@ -35,10 +42,29 @@ the caller (e.g. st.session_state in the Streamlit app - this module has
 no Streamlit dependency of its own) keyed by (pdf_name, page_number),
 written to only for pages that actually went through OCR. A page already
 in the cache is never re-OCR'd.
+
+Load-based engine routing (cloud memory ceiling)
+--------------------------------------------------
+PaddleOCR is the more accurate engine but also the heavier one - a large
+model held in memory, more RAM/CPU per page. Tesseract is lighter and
+faster but less accurate. Against Streamlit Community Cloud's ~1GB
+memory ceiling (checklist 5.2's flagged, unverified risk), running
+PaddleOCR as primary across a PDF with a large number of pages needing
+OCR (a bulk scan) risks compounding that cost across the whole document.
+choose_engine_order() decides PER PDF, once, based on how many of its
+pages actually need OCR (checklist 2.2's needs_ocr, counted before any
+OCR runs): at or under HEAVY_LOAD_THRESHOLD pages, PaddleOCR stays
+primary (its accuracy is worth it at that volume); above the threshold,
+Tesseract becomes primary and PaddleOCR becomes the fallback for
+whichever pages Tesseract can't read - trading a little per-page
+accuracy for staying inside the resource budget across a heavy document.
+This is a per-document decision, not a per-page one - so it can't ping-
+pong mid-document.
 """
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from typing import Callable, MutableMapping, Optional
 
@@ -51,6 +77,8 @@ DEFAULT_DPI = 200  # PyMuPDF's baseline is 72 dpi; zoom = dpi / 72.0.
 # 200 dpi is the well-known OCR sweet spot: comfortably legible for
 # small/dense certificate text without the multi-second-per-page cost
 # of going much higher.
+
+HEAVY_LOAD_THRESHOLD = 15  # pages needing OCR in one PDF - see "Load-based engine routing" above
 
 ProgressCallback = Callable[[int, int], None]  # (pages_done, pages_total)
 
@@ -92,7 +120,7 @@ def _get_paddle_ocr():
         _paddle_ocr_singleton = PaddleOCR(
             use_textline_orientation=True,
             lang="en",
-            enable_mkldnn=False,
+            enable_mkldnn=(sys.platform == "linux"),  # off on Windows (this dev machine's crash), on for cloud CPU vectorization
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
         )
@@ -142,32 +170,76 @@ def _ocr_with_tesseract(image: Image.Image) -> str:
     return pytesseract.image_to_string(image)
 
 
+# -------------------------------------------------------- engine routing --
+
+
+def _engine_func(name: str) -> Callable[[Image.Image], str]:
+    """Resolves _ocr_with_paddle/_ocr_with_tesseract by name, looked up
+    fresh on every call (not a dict of function references captured
+    once) specifically so tests that monkeypatch
+    ocr_pipeline._ocr_with_paddle/_ocr_with_tesseract directly - the
+    established pattern in this project's test suite - keep working
+    exactly as before.
+    """
+    if name == "paddleocr":
+        return _ocr_with_paddle
+    if name == "tesseract":
+        return _ocr_with_tesseract
+    raise ValueError(f"unknown OCR engine: {name!r}")
+
+
+def choose_engine_order(needs_ocr_count: int) -> tuple[str, str]:
+    """Per-PDF primary/fallback engine choice from how many of its pages
+    need OCR - see module docstring's "Load-based engine routing".
+    Returns (primary_engine, fallback_engine).
+    """
+    if needs_ocr_count > HEAVY_LOAD_THRESHOLD:
+        return "tesseract", "paddleocr"
+    return "paddleocr", "tesseract"
+
+
 # ------------------------------------------------------------- per-page --
 
 
-def ocr_page(pdf_name: str, page: fitz.Page, page_number: int, *, dpi: int = DEFAULT_DPI) -> OcrPageResult:
-    """Actually run OCR on one page: PaddleOCR first, Tesseract if that
-    raises anything at all. Never raises itself - a failure of both
-    engines becomes engine="failed", success=False with both errors
-    recorded, not an exception the caller has to handle.
+def ocr_page(
+    pdf_name: str,
+    page: fitz.Page,
+    page_number: int,
+    *,
+    dpi: int = DEFAULT_DPI,
+    primary_engine: str = "paddleocr",
+    fallback_engine: str = "tesseract",
+) -> OcrPageResult:
+    """Actually run OCR on one page: primary_engine first, fallback_engine
+    if that raises anything at all (which engine is primary is decided
+    per-PDF by choose_engine_order(), defaulting to PaddleOCR-primary for
+    any caller - e.g. direct tests - that doesn't pass the pair
+    explicitly). Never raises itself - a failure of both engines becomes
+    engine="failed", success=False with both errors recorded, not an
+    exception the caller has to handle.
     """
     image = rasterize_page(page, dpi=dpi)
+    primary_func = _engine_func(primary_engine)
+    fallback_func = _engine_func(fallback_engine)
 
     try:
-        text = _ocr_with_paddle(image)
-        return OcrPageResult(pdf_name, page_number, text, "paddleocr", True)
-    except Exception as paddle_exc:  # noqa: BLE001 - PaddleOCR/PaddleX has no stable exception hierarchy to narrow to
+        text = primary_func(image)
+        return OcrPageResult(pdf_name, page_number, text, primary_engine, True)
+    except Exception as primary_exc:  # noqa: BLE001 - PaddleOCR/PaddleX has no stable exception hierarchy to narrow to
         try:
-            text = _ocr_with_tesseract(image)
-            return OcrPageResult(pdf_name, page_number, text, "tesseract", True)
-        except Exception as tess_exc:  # noqa: BLE001 - genuinely last resort
+            text = fallback_func(image)
+            return OcrPageResult(pdf_name, page_number, text, fallback_engine, True)
+        except Exception as fallback_exc:  # noqa: BLE001 - genuinely last resort
             return OcrPageResult(
                 pdf_name,
                 page_number,
                 "",
                 "failed",
                 False,
-                error=f"PaddleOCR failed ({paddle_exc}); Tesseract fallback also failed ({tess_exc})",
+                error=(
+                    f"{primary_engine} failed ({primary_exc}); "
+                    f"{fallback_engine} fallback also failed ({fallback_exc})"
+                ),
             )
 
 
@@ -199,6 +271,9 @@ def resolve_pdf_text(
     results: list[OcrPageResult] = []
     total = len(pre_checks)
 
+    needs_ocr_count = sum(1 for pre in pre_checks if pre.needs_ocr)
+    primary_engine, fallback_engine = choose_engine_order(needs_ocr_count)
+
     try:
         doc_cm = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:  # noqa: BLE001 - defense-in-depth; check_pdf_text_layers already opened these same bytes once
@@ -216,7 +291,10 @@ def resolve_pdf_text(
                     result = cache[cache_key]
                 else:
                     page = doc[page_number - 1]
-                    result = ocr_page(pdf_name, page, page_number, dpi=dpi)
+                    result = ocr_page(
+                        pdf_name, page, page_number, dpi=dpi,
+                        primary_engine=primary_engine, fallback_engine=fallback_engine,
+                    )
                     if cache is not None:
                         cache[cache_key] = result
             else:

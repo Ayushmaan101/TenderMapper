@@ -23,7 +23,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pymupdf as fitz  # noqa: E402
 
 import ocr.pipeline as ocr_pipeline  # noqa: E402
-from ocr.pipeline import DEFAULT_DPI, OcrPageResult, ocr_page, rasterize_page, resolve_pdf_text  # noqa: E402
+from ocr.pipeline import (  # noqa: E402
+    DEFAULT_DPI,
+    HEAVY_LOAD_THRESHOLD,
+    OcrPageResult,
+    choose_engine_order,
+    ocr_page,
+    rasterize_page,
+    resolve_pdf_text,
+)
 
 checks: list[tuple[str, bool]] = []
 
@@ -313,6 +321,106 @@ def test_cache_keyed_per_page_not_per_pdf() -> None:
         check("re-run with the warmed cache -> zero additional OCR calls", engines.paddle_calls == 2)
 
 
+# ------------------------------------------ load-based engine routing --
+
+
+def test_choose_engine_order_threshold() -> None:
+    """Cloud memory-ceiling routing (see ocr/pipeline.py module docstring's
+    "Load-based engine routing"): choose_engine_order() picks PaddleOCR as
+    primary at/under HEAVY_LOAD_THRESHOLD pages needing OCR, and flips to
+    Tesseract-primary strictly above it.
+    """
+    check(
+        "zero pages needing OCR -> PaddleOCR primary (trivially light load)",
+        choose_engine_order(0) == ("paddleocr", "tesseract"),
+    )
+    check(
+        f"exactly at the threshold ({HEAVY_LOAD_THRESHOLD} pages) -> PaddleOCR still primary",
+        choose_engine_order(HEAVY_LOAD_THRESHOLD) == ("paddleocr", "tesseract"),
+    )
+    check(
+        f"one page over the threshold ({HEAVY_LOAD_THRESHOLD + 1} pages) -> flips to Tesseract primary",
+        choose_engine_order(HEAVY_LOAD_THRESHOLD + 1) == ("tesseract", "paddleocr"),
+    )
+    check(
+        "a heavily loaded PDF (100 pages needing OCR) -> Tesseract primary",
+        choose_engine_order(100) == ("tesseract", "paddleocr"),
+    )
+
+
+def test_engine_routing_below_threshold_uses_paddle_primary_end_to_end() -> None:
+    """A light PDF (a small handful of pages needing OCR, well under
+    HEAVY_LOAD_THRESHOLD) routes through PaddleOCR as primary end-to-end
+    via resolve_pdf_text() - not just at the choose_engine_order() unit
+    level above.
+    """
+    doc = fitz.open()
+    for i in range(3):
+        _make_scanned_page(doc, f"light load page {i}")
+    pdf_bytes = pdf_bytes_from(doc)
+
+    with _FakeOcrEngines() as engines:
+        results = resolve_pdf_text("light_load.pdf", pdf_bytes)
+
+    check(
+        "light load (3 pages needing OCR, under threshold) -> every page resolved via paddleocr (primary)",
+        all(r.engine == "paddleocr" for r in results),
+    )
+    check(
+        "light load -> PaddleOCR was actually invoked, Tesseract was not",
+        engines.paddle_calls == 3 and engines.tesseract_calls == 0,
+    )
+
+
+def test_engine_routing_above_threshold_uses_tesseract_primary_end_to_end() -> None:
+    """A heavy PDF (more pages needing OCR than HEAVY_LOAD_THRESHOLD)
+    routes through Tesseract as primary end-to-end, with PaddleOCR
+    demoted to fallback (and never actually invoked here, since Tesseract
+    succeeds on every page in this scenario).
+    """
+    doc = fitz.open()
+    page_count = HEAVY_LOAD_THRESHOLD + 1
+    for i in range(page_count):
+        _make_scanned_page(doc, f"heavy load page {i}")
+    pdf_bytes = pdf_bytes_from(doc)
+
+    with _FakeOcrEngines() as engines:
+        results = resolve_pdf_text("heavy_load.pdf", pdf_bytes)
+
+    check(
+        f"heavy load ({page_count} pages needing OCR, over threshold) -> every page resolved via tesseract (primary)",
+        all(r.engine == "tesseract" for r in results),
+    )
+    check(
+        "heavy load -> Tesseract was actually invoked, PaddleOCR was not (Tesseract never failed)",
+        engines.tesseract_calls == page_count and engines.paddle_calls == 0,
+    )
+
+
+def test_engine_routing_above_threshold_still_falls_back_to_paddle() -> None:
+    """Above the threshold, Tesseract is primary - but PaddleOCR remains
+    available as the fallback for any page Tesseract itself can't read,
+    proving the routing swap demotes PaddleOCR rather than dropping it.
+    """
+    doc = fitz.open()
+    page_count = HEAVY_LOAD_THRESHOLD + 1
+    for i in range(page_count):
+        _make_scanned_page(doc, f"heavy load with failing primary page {i}")
+    pdf_bytes = pdf_bytes_from(doc)
+
+    with _FakeOcrEngines(tesseract_raises=RuntimeError("tesseract down for this test")) as engines:
+        results = resolve_pdf_text("heavy_load_fallback.pdf", pdf_bytes)
+
+    check(
+        "heavy load with Tesseract (primary) failing -> every page falls back to paddleocr",
+        all(r.engine == "paddleocr" for r in results),
+    )
+    check(
+        "heavy load fallback -> both engines were actually invoked (Tesseract tried first, then PaddleOCR)",
+        engines.tesseract_calls == page_count and engines.paddle_calls == page_count,
+    )
+
+
 def main() -> None:
     test_real_paddleocr_success()
     test_real_tesseract_fallback()
@@ -325,6 +433,10 @@ def main() -> None:
     test_cache_hit_avoids_reinvoking_ocr()
     test_no_cache_reinvokes_ocr_every_time()
     test_cache_keyed_per_page_not_per_pdf()
+    test_choose_engine_order_threshold()
+    test_engine_routing_below_threshold_uses_paddle_primary_end_to_end()
+    test_engine_routing_above_threshold_uses_tesseract_primary_end_to_end()
+    test_engine_routing_above_threshold_still_falls_back_to_paddle()
 
     if all(ok for _, ok in checks):
         print(f"ALL CHECKS PASSED ({len(checks)}/{len(checks)})")

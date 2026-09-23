@@ -795,11 +795,13 @@ crash app startup, and that the app stays fully interactive afterward. **Full re
 against the real production DB** via a direct `AppTest` boot with `st.cache_resource.clear()`
 first.*
 
-### [x] 5.3 — Run tab UI lifecycle & reviewer control decluttering
+### [x] 5.3 — Run tab UI lifecycle, reviewer control decluttering & cloud OCR performance
 User-directed post-completion refinement (not part of the original numbered checklist; folded
-into Phase 5). On a fresh boot or right after "Next Company", the Results section rendered
-every row as ⚠️ Flagged (0.00) and stacked one "Search again" expander per flagged column down
-the whole screen before the reviewer had uploaded anything to search against.
+into Phase 5), delivered across two requests in the same session. On a fresh boot or right after
+"Next Company", the Results section rendered every row as ⚠️ Flagged (0.00) and stacked one
+"Search again" expander per flagged column down the whole screen before the reviewer had
+uploaded anything to search against; separately, checklist 5.2's flagged-not-solved PaddleOCR
+resource-ceiling risk needed a first real mitigation, not just documentation.
 ✅ *Done 2026-09-23 — **Run-completion gate**: new `run/results.py::HAS_RUN_KEY`
 (`st.session_state["mapping_has_run"]`) + `is_mapping_complete()`. `app.py`'s Results section
 now only calls `render_results_section`/`render_export_section` when `is_mapping_complete()` is
@@ -834,5 +836,31 @@ replace the old per-column-expander-presence assertions, and `Selectbox.select(c
 used to switch the target column before interacting with that column's now-conditionally-
 rendered text box/button (two-step: select + rerun to regenerate the tree with the new column's
 widgets, only then interact with them — a real `AppTest` mechanic, not simplifiable to one
-`.run()`). **Full regression suite (18 top-level test files) passes clean; also confirmed
+`.run()`).
+**Cloud OCR performance adjustments**: `ocr/pipeline.py::_get_paddle_ocr()`'s `enable_mkldnn`
+is now `sys.platform == "linux"`-gated instead of unconditionally `False` — off on this Windows
+dev box (required, per checklist 2.3's confirmed PP-OCRv6/oneDNN crash), on for Community
+Cloud's CPU vectorization. **Directed, unverified against a real Linux box** — flagged in
+PROJECT_HARNESS.md §8/§7, not silently assumed safe. New `choose_engine_order(needs_ocr_count)`
++ `HEAVY_LOAD_THRESHOLD = 15`: `resolve_pdf_text()` counts a PDF's `needs_ocr` pages (checklist
+2.2) once, up front, and routes the WHOLE document through Tesseract-primary/PaddleOCR-fallback
+above the threshold (lighter/faster engine for bulk scans, trading some accuracy to stay inside
+Community Cloud's ~1GB ceiling) or PaddleOCR-primary/Tesseract-fallback at or under it (accuracy
+is worth it at that volume) — a per-document decision, so it can't ping-pong mid-document.
+`ocr_page()` gained `primary_engine`/`fallback_engine` params (default to the original
+PaddleOCR-primary order, so no existing call site or test needed to change); its internal engine
+dispatch changed from a dict of function references captured once at import time to a small
+`_engine_func(name)` resolver that re-reads the module-level `_ocr_with_paddle`/
+`_ocr_with_tesseract` names fresh on every call — a fixed dict would have silently broken this
+project's established test pattern of monkeypatching those two names directly, since the dict
+would keep pointing at the original functions regardless. **Verification**: four new tests in
+`tests/verify_ocr_pipeline.py` — `choose_engine_order` unit-tested at/just-below/just-above/well-
+above the threshold; a light-load PDF (3 pages needing OCR) routing end-to-end through
+`resolve_pdf_text` via PaddleOCR-primary with zero Tesseract calls; a heavy-load PDF
+(`HEAVY_LOAD_THRESHOLD + 1` pages) routing via Tesseract-primary with zero PaddleOCR calls; the
+same heavy-load scenario with Tesseract itself mocked to fail, confirming every page still falls
+back to PaddleOCR (proving the swap demotes it rather than dropping it) — suite now 44/44,
+including the two pre-existing real-engine tests (real PaddleOCR success, real Tesseract
+fallback) confirmed still passing on this Windows box with the new platform-gated `enable_mkldnn`
+logic in place. **Full regression suite (18 top-level test files) passes clean; also confirmed
 against the real production DB.***
