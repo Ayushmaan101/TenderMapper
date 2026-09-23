@@ -431,22 +431,61 @@ reasoning correctly explaining why — directly proving the prompt does its one 
 passing mentions and boilerplate rather than rewarding superficial keyword overlap.
 Full regression suite (all 10 test files) passes clean.*
 
-### [ ] 3.3 — Full per-column resolution loop
+### [x] 3.3 — Full per-column resolution loop
 Drive the whole pipeline for **every column in every configured table**, generalizing to any
 configured shape. Progress reporting across the whole run.
 **Verify:** with a 3rd table added via the Config tab, the run resolves its columns too — nothing
 hardcodes 2 tables / 10 / 13.
-🔶 *Partially done as of checklist 5.1 (2026-09-23), at the user's explicit direction to give
-5.1 a real end-to-end flow to test error handling against.* `run/run_button.py` +
-`run/pipeline_runner.py` already do: the "▶️ Run Mapping" button, ingest → text-layer-check →
-OCR → building `corpus_index`/`page_texts`/`reference_index`, with per-document error isolation
-and progress reporting (page-level, via a callback). **Still to do here**: the actual per-column
-loop — for every configured column, BM25-search `corpus_index` with the column's requirement
-text + stored synonyms + `reference_index`, Groq-verify the candidate pool
-(`verify.groq_verifier.resolve_column`), and write each column's result into
-`st.session_state["resolution_results"]` — plus progress reporting across that column-by-column
-loop specifically (distinct from the page-level progress the OCR step already reports). Re-check
-CHECKLIST.md's verify line above once that part is built.
+✅ *Done 2026-09-23 — completed on top of checklist 5.1's partial build (ingest → OCR →
+search-index, with per-document error isolation). **`run/pipeline_runner.py`** gains
+`resolve_all_columns(conn, corpus_index, page_texts, reference_index)`: reads every
+`schema_table`/`schema_column` fresh from `conn` (never cached), for each column queries the
+index with the column's requirement text + its stored synonyms
+(`search.bm25_index.search`, `DEFAULT_POOL_SIZE=20` candidates merged with reference-index
+hits), verifies the pool via `verify.groq_verifier.resolve_column` (already bounded-worker +
+early-stopping-at-0.90 by its own checklist 3.2 defaults — no new concurrency code needed
+here), and returns the single best result per column, keyed by `column.id` — never silently
+missing a column, even one with zero candidates (an empty corpus resolves every column to a
+clear "unresolved" placeholder with **zero Groq calls made**, not a guess). Columns are
+resolved **one at a time**, deliberately not ALSO parallelized against each other on top of
+`resolve_column`'s own internal concurrency — keeps total concurrent Groq load bounded at
+exactly `max_workers` regardless of column count, not `max_workers × column count`.
+**Overwrite semantics (a real decision, documented in the module)**: every "Run Mapping" click
+replaces `resolution_results` entirely with fresh output — it does not try to distinguish "a
+prior human edit" from "a stale earlier auto-result" per column, since checklist 4.4 already
+found `VerificationResult.success` alone can't tell those apart. Simple and predictable:
+clicking Run Mapping means start the automated resolution fresh.
+**UI (`run/run_button.py`)**: a second, distinct progress bar for the column-resolution phase
+(`"Resolving requirements — N/M: <column name>"`), separate from phase 1's page-level OCR
+progress bar, so a reviewer can see which phase is running.
+**Verification — three suites, orchestrated by `tests/verify_column_resolution.py`, all
+passing**: `verify_column_resolution_unit.py` (17/17, mocked Groq, real BM25 index) — every
+configured column across **two tables** gets an entry; a column findable only via a *stored
+synonym* (zero literal wording overlap otherwise) still resolves correctly, proving synonyms
+are genuinely wired into the query rather than accepted as a no-op parameter; a column with
+nothing relevant anywhere resolves low-confidence and is correctly flagged by checklist 4.2's
+`is_flagged()`; an empty corpus makes every column resolve to the unresolved placeholder with
+zero Groq calls; `progress_callback` fires once per column in strict order. **A real,
+non-obvious bug in the test's own mock was caught via genuine run-to-run flakiness** (3/3
+re-runs varied) before being fixed: a naive "does this marker phrase appear anywhere in the
+prompt" check let a column's *own requirement text* (which legitimately contains its own
+marker phrase) satisfy the check for *every* candidate regardless of which page was actually
+being evaluated — scoping the check to the "Page text:" section specifically (not the whole
+prompt) fixed it deterministically, confirmed via 5 consecutive clean runs.
+`verify_column_resolution_live.py` (7/7, **real Groq calls**, real seeded schema) — against
+all 10 real Table 1 columns and a synthetic corpus with a genuine WHO-GMP match: the matching
+column (Item 4) resolved 0.95 confidence to the exact right page with a real snippet and
+correctly *not* flagged; a genuinely unrelated column (Item 1) resolved 0.0 confidence and
+correctly flagged.
+`verify_column_resolution_ui.py` (12/12, `AppTest`, through the real "Run Mapping" button,
+mocked Groq but **real OCR** on a genuinely rasterized synthetic scanned page) —
+`resolution_results` auto-populates for all 23 seeded columns; the matching column's Status
+cell in the real rendered grid reads "Resolved", every other column's reads "Flagged"; the
+resolved match flows correctly into both the `st.data_editor` grid and the Excel export
+(checklist 4.4 integration, verified via the real exported workbook bytes). Needed a bumped
+`AppTest` timeout (default 3s is far too short for real OCR — checklist 0.5 measured ~50s for
+PaddleOCR's own first-use init). Full regression suite (all 16 top-level test files) passes
+clean; also confirmed against the real production DB.*
 
 ---
 

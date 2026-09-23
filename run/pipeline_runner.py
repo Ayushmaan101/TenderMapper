@@ -1,36 +1,65 @@
-"""Ingest -> OCR/text-layer resolution bridge (checklist 5.1).
+"""Ingest -> OCR -> search-index -> per-column resolution pipeline
+(checklists 5.1 and 3.3).
 
-Builds a real, tested slice of checklist 3.3's still-pending per-column
-resolution loop: turns the session's ingested documents into resolved
-per-page OCR/text records and the search-index session-state contract
-checklist 4.2 defined (corpus_index, page_texts, reference_index) - by
-wiring together already-built, already-tested pieces
-(ocr.pipeline.resolve_pdf_text, search.bm25_index.build_corpus_index,
-ocr.references.build_index). Deliberately does NOT run BM25 candidate
-search or Groq verification per schema column - that is the remaining,
-still-deferred substance of checklist 3.3 (for every column in every
-configured table, search + verify): see CHECKLIST.md.
+Two stages, wiring together already-built, already-tested pieces:
 
-Error isolation is the actual point of this module for checklist 5.1: a
-single corrupt/encrypted/unopenable document must never abort processing
-for its siblings. Each document is processed independently inside its
-own try/except; a failure produces one warning and that document is
+  1. run_ocr_and_build_index() (checklist 5.1) - turns the session's
+     ingested documents into resolved per-page OCR/text records and the
+     search-index session-state contract checklist 4.2 defined
+     (corpus_index, page_texts, reference_index), via
+     ocr.pipeline.resolve_pdf_text, search.bm25_index.build_corpus_index,
+     ocr.references.build_index.
+
+  2. resolve_all_columns() (checklist 3.3) - for every schema_column in
+     every schema_table currently configured, queries that same index
+     with the column's requirement text + stored synonyms
+     (search.bm25_index.search, top DEFAULT_POOL_SIZE candidates, merged
+     with reference-index hits), then verifies the candidate pool via
+     Groq (verify.groq_verifier.resolve_column - already bounded-worker
+     and early-stopping at 0.90 by its own defaults, checklist 3.2),
+     returning the single best verified result per column. Columns are
+     processed one at a time (not also parallelized across each other,
+     on top of the concurrency resolve_column already does within one
+     column's candidate pool) - deliberately, to keep the total
+     concurrent Groq load bounded at exactly max_workers regardless of
+     how many columns are configured, not max_workers times the column
+     count.
+
+Error isolation is the point of stage 1 for checklist 5.1: a single
+corrupt/encrypted/unopenable document must never abort processing for
+its siblings. Each document is processed independently inside its own
+try/except; a failure produces one warning and that document is
 skipped, while every other document still gets processed. Within a
 document, per-page OCR failures are already handled by
 ocr.pipeline.resolve_pdf_text/ocr_page (checklist 2.3) - a page where
 both PaddleOCR and Tesseract fail becomes engine="failed",
 success=False, text="", and the next page still gets processed; nothing
 here needs to duplicate that.
+
+Overwrite semantics for stage 2: resolve_all_columns() always returns a
+FRESH result for every column - it does not know about, and does not
+try to preserve, any prior manual edit or earlier automated result
+already sitting in st.session_state["resolution_results"]. The caller
+(run/run_button.py) replaces the whole dict with this fresh output. This
+is a deliberate simplicity choice: "Run Mapping" is an explicit user
+action, and partially merging "was this a human correction or a stale
+auto-result" per column has no reliable signal to decide on (checklist
+4.4 found that even VerificationResult.success alone means either
+"Groq resolved it" or "a human edited it" - there's no third state to
+distinguish "this should survive a re-run" from "this shouldn't").
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from db import crud
 from ocr.pipeline import OcrPageResult, resolve_pdf_text
 from ocr.references import ReferenceIndex, build_index
 from ocr.text_check import PdfProcessingError
 from search.bm25_index import CorpusIndex, PageRecord, build_corpus_index
+from search.bm25_index import search as bm25_search
+from verify.groq_verifier import VerificationResult, resolve_column
 
 
 @dataclass
@@ -86,3 +115,59 @@ def run_ocr_and_build_index(
     reference_index = build_index((r.pdf_name, r.page_number, r.text) for r in outcome.ocr_results)
 
     return outcome, corpus_index, page_texts, reference_index
+
+
+_UNRESOLVED_RESULT = VerificationResult(
+    pdf_name="", page_number_or_range="", confidence=0.0, match_snippet="",
+    reasoning="No candidate pages were found to verify against.", success=False, error=None,
+)
+
+
+def resolve_all_columns(
+    conn,
+    corpus_index: CorpusIndex,
+    page_texts: dict[tuple[str, int], str],
+    reference_index: Optional[ReferenceIndex] = None,
+    *,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> dict[int, VerificationResult]:
+    """For every schema_column in every schema_table currently
+    configured (read fresh from conn - never cached across calls), run
+    the full search+verify pipeline and return the single best verified
+    result per column, keyed by column.id - the exact shape
+    st.session_state["resolution_results"] expects.
+
+    A column whose BM25 search returns zero candidates at all (only
+    possible when corpus_index itself has zero pages - see
+    search.bm25_index.search's own guard) resolves to a clear
+    "unresolved" placeholder rather than None, so every configured
+    column always gets an entry - never silently missing.
+
+    progress_callback, if given, is called as (columns_done,
+    columns_total, column_name) once per column, after that column
+    finishes.
+    """
+    results: dict[int, VerificationResult] = {}
+
+    tables = crud.get_tables(conn)
+    all_columns = [(table, column) for table in tables for column in crud.get_columns(conn, table.id)]
+    total = len(all_columns)
+
+    for i, (_table, column) in enumerate(all_columns):
+        synonyms = [s.synonym_text for s in crud.get_synonyms(conn, column.id)]
+        candidates = bm25_search(
+            corpus_index, column.requirement_text, synonyms,
+            reference_index=reference_index,
+        )
+
+        if candidates:
+            best = resolve_column(column.name, column.requirement_text, candidates, page_texts)
+        else:
+            best = None
+
+        results[column.id] = best if best is not None else _UNRESOLVED_RESULT
+
+        if progress_callback is not None:
+            progress_callback(i + 1, total, column.name)
+
+    return results
