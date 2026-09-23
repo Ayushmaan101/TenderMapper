@@ -386,12 +386,50 @@ pool-size limits hold across corpus sizes both smaller (returns everything) and 
 (caps exactly, including when reference hits alone would otherwise exceed the cap). Full
 regression suite (all 9 test files) passes clean.*
 
-### [ ] 3.2 — Groq verification / rerank
+### [x] 3.2 — Groq verification / rerank
 For each candidate page, send page text + requirement text to Groq (Llama 3.3 70B); get back
 structured JSON `{pdf_name, page_number_or_range, confidence, match_snippet}`. Handle malformed
 JSON, rate limits, and retries. Batch/parallelize sensibly — this runs per column per candidate.
 **Verify:** returns well-formed JSON for every column; a deliberately wrong candidate gets low
 confidence; malformed model output is caught and retried rather than crashing the run.
+✅ *Done 2026-09-23 — Model: `openai/gpt-oss-120b` (same substitution as 1.4, kept consistent
+across both Groq call sites — `llama-3.3-70b-versatile` still doesn't exist on this account;
+PROJECT_HARNESS.md §2/§8 updated to drop the "unconfirmed" flag left on this row after 1.4).
+**`verify/groq_verifier.py`**: `verify_candidate` (single candidate, never raises — every
+failure falls back to a `VerificationResult` with `confidence=0.0`, the candidate's own BM25
+snippet kept as visible context, and a reasoning string flagging it for human review),
+`verify_candidates` (bounded `ThreadPoolExecutor`, default 5 workers, plus early stopping —
+once a result clears `early_stop_confidence` (default 0.90), not-yet-started candidate calls
+are cancelled; already-in-flight ones are still awaited rather than left as orphaned background
+threads, a deliberate documented tradeoff), `resolve_column` (top-ranked result per column, or
+`None` for zero candidates). Structured JSON schema exactly as specified
+(`pdf_name, page_number_or_range, confidence, match_snippet, reasoning`), response parsing
+tolerant of markdown code fences (same pattern as `config/synonyms.py`). **`pdf_name`/
+`page_number_or_range` are never trusted from the model's JSON echo** — always taken from the
+candidate we already know we asked about, closing off a class of hallucination bugs for
+information already held with certainty; verified directly with a candidate whose model
+response deliberately claims a different pdf/page. Retryable failures (rate limit, timeout,
+connection, server error) get up to 3 attempts, with an actual backoff sleep before retrying a
+429 specifically (verified via a monkeypatched `time.sleep`, using a genuinely constructed
+`groq.RateLimitError` via real `httpx.Request`/`Response` objects, not a generic stand-in).
+**Verification — two suites, orchestrated by `tests/verify_groq_verifier.py`, both passing:**
+`verify_groq_verifier_unit.py` (30/30, mocked Groq) — a true compliance match (confidence ≥0.9,
+snippet reflects real evidence); a false-positive passing-mention candidate correctly scored
+low; the model's echoed pdf/page deliberately ignored; missing-API-key, simulated network
+failure, and malformed-JSON all falling back gracefully with `confidence=0.0` rather than
+raising; the 429-retry-with-backoff behavior; `resolve_column` correctly picking the single
+highest-confidence result among 5 out-of-order candidates (and returning `None` for zero
+candidates); early stopping proven to skip remaining candidates deterministically
+(`max_workers=1` makes execution sequential, so a call-counter proves later candidates never
+ran) while a no-strong-match pool is proven to still evaluate every candidate; and a candidate
+missing from the page-text map correctly falling back to its own BM25 snippet.
+`verify_groq_verifier_live.py` (7/7, **two real Groq calls**) — against the real seed schema's
+WHO-GMP requirement text (not synthetic stand-ins): a genuine WHO-GMP certificate page scored
+0.95 confidence with accurate reasoning citing the actual issue date and issuing authority; a
+page that only mentions WHO-GMP in passing (pointing to "Annexure B") scored 0.0, with
+reasoning correctly explaining why — directly proving the prompt does its one job, penalizing
+passing mentions and boilerplate rather than rewarding superficial keyword overlap.
+Full regression suite (all 10 test files) passes clean.*
 
 ### [ ] 3.3 — Full per-column resolution loop
 Drive the whole pipeline for **every column in every configured table**, generalizing to any
